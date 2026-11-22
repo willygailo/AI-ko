@@ -305,5 +305,17 @@ Covers scope allowlists & DNS boundary checks, 3-tier approval workflows, tool o
 
 ---
 
+## Contributing & Contributors
+
+Contributions are welcome! Please read [CONTRIBUTING.md](./CONTRIBUTING.md), [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md), and [SECURITY.md](./SECURITY.md) before opening a pull request.
+
+<a href="https://github.com/willygailo/AI-ko/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=willygailo/AI-ko" alt="Contributors" />
+</a>
+
+- **Maintainer**: [@willygailo](https://github.com/willygailo)
+
+---
+
 > [!WARNING]
 > **Authorized Use Only**: AegisPT is intended strictly for authorized security assessments, defensive hardening, and isolated lab testing. Always obtain explicit written authorization and configure strict scope allowlists before testing any system.
