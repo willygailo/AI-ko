@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.schemas import LLMDiscoverInput, LLMProfileCreate
 from app.core.auth import require_api_token
+from app.core.vault import encrypt_str
 from app.db.database import get_db
 from app.db.models import LLMProfile
 from app.llm.router import LLMProfileConfig, llm_router
@@ -52,7 +53,7 @@ async def create_profile(body: LLMProfileCreate, db: AsyncSession = Depends(get_
         name=body.name,
         provider=body.provider,
         base_url=body.base_url.rstrip("/"),
-        api_key=body.api_key,
+        api_key=encrypt_str(body.api_key),
         fast_model=body.fast_model,
         reasoning_model=body.reasoning_model,
         redact_outbound=body.redact_outbound,

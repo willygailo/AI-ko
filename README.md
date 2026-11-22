@@ -4,13 +4,13 @@
 
 ### Private, Provider-Agnostic AI Web & API Penetration Testing Platform
 
-Built for Kali Linux with allowlist-only scope enforcement, 3-tier human-in-the-loop approval gates, 14 typed security tool adapters, and a real-time Web Dashboard + CLI.
+Built for Kali Linux with allowlist-only scope enforcement, 3-tier human-in-the-loop approval gates, 19 typed security tool adapters, and a real-time Web Dashboard + CLI.
 
 [![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115%2B-009688?style=for-the-badge&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
 [![React](https://img.shields.io/badge/React-18%20%2B%20TypeScript-61DAFB?style=for-the-badge&logo=react&logoColor=black)](https://react.dev/)
 [![Kali Linux](https://img.shields.io/badge/Kali%20Linux-Ready-557C94?style=for-the-badge&logo=kalilinux&logoColor=white)](https://www.kali.org/)
-[![Tests](https://img.shields.io/badge/Pytest-24%20Passed-22C55E?style=for-the-badge&logo=pytest&logoColor=white)](./aegispt/backend/tests)
+[![Tests](https://img.shields.io/badge/Pytest-30%20Passed-22C55E?style=for-the-badge&logo=pytest&logoColor=white)](./aegispt/backend/tests)
 
 [Architecture](#architecture) •
 [Autonomy & Guardrails](#autonomy--safety-guardrails) •
@@ -27,11 +27,11 @@ Built for Kali Linux with allowlist-only scope enforcement, 3-tier human-in-the-
 
 | Pillar | What It Does |
 | :--- | :--- |
-| **Private & Localhost-First** | FastAPI + WebSocket backend binds strictly to `127.0.0.1:8443` with bearer token auth (`data/.api_token`) and local SQLite (WAL) persistence—zero telemetry leaves your machine. |
-| **Provider-Agnostic LLM Router** | Hot-swap between local **Ollama** (`/api/chat`) and remote **vLLM / OpenAI-compatible** (`/v1/chat/completions`) endpoints with `fast` + `reasoning` tiers and automatic reversible secret/JWT/cookie redaction on non-local calls. |
-| **Offline OWASP Playbook Fallback** | Built-in **SQLite FTS5** knowledge base (12 OWASP WSTG & API Top 10 playbooks) powers smart chaining when no LLM server is running. |
-| **Non-Bypassable Scope Engine** | Default-deny `ScopePolicy` enforces allowlisted domains, URLs, and CIDRs, host/path exclusions, DNS resolution boundaries, rate limits (`max_rps`, `max_concurrency`), and `shell=False` typed `argv` compilation. |
-| **Dual Operator Experience** | Operate from the **React Web Dashboard** (zoomable Attack-Surface Graph, Endpoints Explorer, raw log viewer, interactive Tier-3 approval modal, Auth Vault) or the **Typer + Rich Kali CLI** (`./aegispt`). |
+| **Private & Encrypted at Rest** | FastAPI + WebSocket backend binds strictly to `127.0.0.1:8443` with bearer token auth (`data/.api_token`), Fernet-encrypted API keys/auth headers/cookies (`data/.master.key`), and scrubbed log artifacts. |
+| **Provider-Agnostic LLM Router** | Hot-swap between local **Ollama** and remote **vLLM / OpenAI-compatible** endpoints with exponential retry, multi-profile failover, `fast` + `reasoning` tiers, and secret redaction on non-local calls. |
+| **Reflective AI + OWASP Fallback** | Built-in **SQLite FTS5** knowledge base (12 OWASP playbooks) plus persisted **Hypothesis Tracking** (`confirmed`/`disproven`) so the planner adapts across steps even offline. |
+| **Non-Bypassable Scope Engine** | Default-deny `ScopePolicy` enforces path-normalized allowlists (`posixpath`), hop-by-hop redirect SSRF guards, DNS boundaries, per-engagement rate limiting, and `shell=False` typed `argv` compilation. |
+| **Dual Operator Experience** | Operate from the **React Web Dashboard** (Attack Graph, Endpoints, interactive **HTTP Repeater**, **Hypotheses**, **Scan Diff**, Raw Log Viewer, Approval Modal) or **Kali CLI** (`./aegispt`). |
 | **Developer-Ready Reporting** | One-click exports in **Print-ready HTML/PDF**, **Markdown**, **SARIF 2.1.0**, and **JSON** with Posture Score, OWASP breakdown, CVSS v3.1 scores, PoC commands, and remediation guidance. |
 
 ---
@@ -60,9 +60,9 @@ flowchart TD
     end
 
     subgraph Tools["Typed Tool Adapters (shell=False)"]
-        T1["Tier 1 Auto: http_probe, subfinder, httpx, katana, whatweb, wafw00f, sslscan"]
-        T2["Tier 2 Bounded: nmap, ffuf, arjun, nuclei safe, zaproxy passive"]
-        T3["Tier 3 Approval-Gated: sqlmap, dalfox, nuclei intrusive, replay, zap active"]
+        T1["Tier 1 Auto: http_probe, js_miner, subfinder, dnsx, httpx, katana, whatweb, wafw00f, sslscan"]
+        T2["Tier 2 Bounded: naabu, nmap, ffuf, feroxbuster, arjun, nikto, nuclei safe, zaproxy passive"]
+        T3["Tier 3 Approval-Gated: sqlmap, dalfox, differential BOLA/SSTI/open-redirect, nuclei intrusive, zap active"]
     end
 
     WEB <--> API
@@ -124,16 +124,21 @@ sequenceDiagram
 
 | Tool | Default Tier | Escalation Rule | Capability |
 | :--- | :---: | :--- | :--- |
-| `http_probe` | **Tier 1** | Tier 3 on `replay_request` or mutating HTTP methods | Native async HTTP/TLS/header/CORS/cookie, JWT, GraphQL introspection & OpenAPI discovery |
+| `http_probe` | **Tier 1** | Tier 3 on `replay_request`, `differential_bola`, `ssti_probe`, `open_redirect_probe`, or mutating HTTP methods | Native async HTTP/TLS/header/CORS/cookie, JWT, GraphQL introspection, OpenAPI & active BOLA/SSTI/redirect verification |
+| `js_miner` | **Tier 1** | — | Mines in-scope JS bundles for hidden API routes & masked secret/key exposures |
 | `subfinder` | **Tier 1** | — | Passive subdomain enumeration |
+| `dnsx` | **Tier 1** | — | DNS A/AAAA/CNAME/MX/TXT resolution & SPF/DMARC posture checks |
 | `httpx` | **Tier 1** | — | Live HTTP probing (ProjectDiscovery `httpx` with automatic native `http_probe` fallback) |
 | `katana` | **Tier 1** | — | Web & JavaScript route/parameter crawling |
 | `whatweb` | **Tier 1** | — | Server, CMS, and framework fingerprinting |
 | `wafw00f` | **Tier 1** | — | WAF / CDN detection |
 | `sslscan` | **Tier 1** | — | TLS protocol, weak cipher suite, and certificate validity auditor |
+| `naabu` | **Tier 2** | Configurable (`tier2_auto`) | Fast unprivileged TCP connect port scan |
 | `nmap` | **Tier 2** | Configurable (`tier2_auto`) | Bounded TCP port & service version scan (`-sT -Pn --top-ports`) |
 | `ffuf` | **Tier 2** | Configurable (`tier2_auto`) | Rate-limited directory & API discovery with auto-calibration |
+| `feroxbuster` | **Tier 2** | Configurable (`tier2_auto`) | Bounded recursive directory & content discovery |
 | `arjun` | **Tier 2** | Configurable (`tier2_auto`) | HTTP query, form, and JSON parameter mining |
+| `nikto` | **Tier 2** | Configurable (`tier2_auto`) | Bounded web server misconfiguration & dangerous file checks |
 | `nuclei` | **Tier 2** | Tier 3 when `include_intrusive=true` or `fuzz`/`intrusive` tags | Template scanner (Tier 2 excludes `dos,intrusive,fuzz,bruteforce`) |
 | `zaproxy` | **Tier 2** | Tier 3 in `active_scan` mode | OWASP ZAP headless daemon spider/passive alerts & active scan |
 | `dalfox` | **Tier 3** | Always gated in `tiered` mode | Cross-Site Scripting (XSS) parameter verification |
@@ -150,7 +155,7 @@ git clone https://github.com/willygailo/AI-ko.git
 cd AI-ko/aegispt
 cp .env.example .env
 
-# Verify all 14 Kali tool adapters, OWASP KB, and LLM endpoint reachability
+# Verify all 19 Kali & native tool adapters, OWASP KB, and LLM endpoint reachability
 ./aegispt doctor        # Add --json for machine-readable output
 ```
 
@@ -216,6 +221,9 @@ Create a scoped engagement, stream live progress + Tier-3 approvals, and export 
 
 ./aegispt run <ENGAGEMENT_ID>
 ./aegispt runs <ENGAGEMENT_ID>        # Inspect tool runs & raw logs (--log <RUN_ID>)
+./aegispt hypotheses <ENGAGEMENT_ID>  # Inspect AI hypothesis verification lifecycle
+./aegispt diff <ENGAGEMENT_ID>        # Compare pre-scan vs post-scan snapshot deltas
+./aegispt repeat <ENGAGEMENT_ID> http://127.0.0.1:3000/api/Products
 ./aegispt findings <ENGAGEMENT_ID>
 ./aegispt report <ENGAGEMENT_ID> --format html --out report.html
 ./aegispt engagement delete <ENGAGEMENT_ID>
@@ -240,14 +248,14 @@ Create a scoped engagement, stream live progress + Tier-3 approvals, and export 
     │   ├── app/
     │   │   ├── main.py                 # FastAPI app, lifespan, static frontend mount
     │   │   ├── config.py               # Pydantic settings (AEGISPT_*)
-    │   │   ├── core/                   # auth, scope, policy, redactor, events
-    │   │   ├── db/                     # Async SQLite (WAL) engine, ORM models & shared persistence
-    │   │   ├── llm/                    # Ollama & OpenAI-compatible router
-    │   │   ├── tools/                  # 14 typed tool adapters & registry
+    │   │   ├── core/                   # auth, scope, policy, redactor, vault, ratelimit, events
+    │   │   ├── db/                     # Async SQLite (WAL) engine, ORM models, persistence & snapshots
+    │   │   ├── llm/                    # Ollama & OpenAI-compatible router with retry & failover
+    │   │   ├── tools/                  # 19 typed tool adapters & registry
     │   │   ├── knowledge/              # SQLite FTS5 OWASP WSTG/API playbooks (12)
     │   │   ├── agents/                 # Orchestrator, graph context, HTML/MD/SARIF reporter
-    │   │   └── api/                    # REST routers & WebSocket handler
-    │   └── tests/                      # Unit & integration test suite (24 tests)
+    │   │   └── api/                    # REST routers, Repeater & WebSocket handler
+    │   └── tests/                      # Unit & integration test suite (30 tests)
     ├── cli/aegispt_cli/                # Typer + Rich CLI client
     ├── frontend/                       # React + Vite + TypeScript + Tailwind UI
     ├── lab/docker-compose.lab.yml      # Localhost-only OWASP Juice Shop practice target
@@ -286,8 +294,8 @@ All `/api/v1/*` routes (except `/api/v1/system/health`) require `Authorization: 
 | :--- | :--- |
 | **System & KB** | `GET /api/v1/system/health`, `GET /api/v1/system/doctor`, `GET /api/v1/system/tools`, `GET /api/v1/system/kb/search` |
 | **LLM Profiles** | `GET/POST /api/v1/llm-profiles`, `DELETE /api/v1/llm-profiles/{id}`, `POST /api/v1/llm-profiles/discover` |
-| **Engagements** | `GET/POST /api/v1/engagements`, `GET/DELETE /api/v1/engagements/{id}`, `POST /api/v1/engagements/{id}/{start\|pause\|resume\|stop\|run-tool}`, `GET /api/v1/engagements/{id}/runs/{run_id}/log` |
-| **Approvals & Findings** | `GET /api/v1/engagements/{id}/approvals`, `POST /api/v1/approvals/{approval_id}/decide`, `GET /api/v1/engagements/{id}/findings`, `PATCH /api/v1/findings/{finding_id}` |
+| **Engagements** | `GET/POST /api/v1/engagements`, `GET/DELETE /api/v1/engagements/{id}`, `POST /api/v1/engagements/{id}/{start\|pause\|resume\|stop\|run-tool\|repeater\|snapshots}`, `GET /api/v1/engagements/{id}/diff`, `GET /api/v1/engagements/{id}/runs/{run_id}/log` |
+| **Approvals, Hypotheses & Findings** | `GET /api/v1/engagements/{id}/approvals`, `POST /api/v1/approvals/{approval_id}/decide`, `GET /api/v1/engagements/{id}/hypotheses`, `PATCH /api/v1/hypotheses/{id}`, `GET/POST /api/v1/engagements/{id}/findings`, `PATCH /api/v1/findings/{finding_id}` |
 | **Reports & Stream** | `GET /api/v1/engagements/{id}/report?format=html\|markdown\|sarif\|json`, `WS /ws/engagements/{id}?token=<token>` |
 
 </details>

@@ -6,10 +6,15 @@ from typing import Any
 from app.tools.arjun import ArjunAdapter
 from app.tools.base import BaseToolAdapter
 from app.tools.dalfox import DalfoxAdapter
+from app.tools.dnsx_tool import DnsxAdapter
+from app.tools.feroxbuster_tool import FeroxbusterAdapter
 from app.tools.ffuf import FfufAdapter
 from app.tools.http_probe import HttpProbeAdapter
 from app.tools.httpx_tool import HttpxAdapter
+from app.tools.js_miner import JsMinerAdapter
 from app.tools.katana import KatanaAdapter
+from app.tools.naabu_tool import NaabuAdapter
+from app.tools.nikto_tool import NiktoAdapter
 from app.tools.nmap_tool import NmapAdapter
 from app.tools.nuclei import NucleiAdapter
 from app.tools.sqlmap import SqlmapAdapter
@@ -24,15 +29,20 @@ class ToolRegistry:
     def __init__(self) -> None:
         adapters: list[BaseToolAdapter] = [
             HttpProbeAdapter(),
+            JsMinerAdapter(),
             SubfinderAdapter(),
+            DnsxAdapter(),
             HttpxAdapter(),
             KatanaAdapter(),
             WhatWebAdapter(),
             Wafw00fAdapter(),
             SslscanAdapter(),
+            NaabuAdapter(),
             NmapAdapter(),
             FfufAdapter(),
+            FeroxbusterAdapter(),
             ArjunAdapter(),
+            NiktoAdapter(),
             NucleiAdapter(),
             DalfoxAdapter(),
             SqlmapAdapter(),

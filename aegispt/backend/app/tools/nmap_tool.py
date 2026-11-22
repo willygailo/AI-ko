@@ -1,7 +1,8 @@
 """Nmap bounded TCP service & port fingerprinting adapter (Tier 2)."""
 from __future__ import annotations
 
-import xml.etree.ElementTree as ET
+import defusedxml.ElementTree as ET
+from xml.etree.ElementTree import ParseError as XMLParseError
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -94,7 +95,7 @@ class NmapAdapter(BaseToolAdapter):
                             discovered_by=self.name,
                         )
                     )
-            except ET.ParseError:
+            except (XMLParseError, Exception):
                 pass
 
         return ToolResult(

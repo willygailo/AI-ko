@@ -3,11 +3,14 @@ from __future__ import annotations
 
 import fnmatch
 import ipaddress
+import posixpath
 import re
 import socket
 from dataclasses import dataclass, field
 from typing import Callable
 from urllib.parse import urlparse
+
+from app.core.vault import decrypt_dict
 
 
 class ScopeViolationError(ValueError):
@@ -69,8 +72,8 @@ class ScopePolicy:
             excluded_paths=list(model.excluded_paths or []),
             max_rps=model.max_rps,
             max_concurrency=model.max_concurrency,
-            custom_headers=dict(model.custom_headers or {}),
-            auth_cookies=dict(model.auth_cookies or {}),
+            custom_headers=decrypt_dict(model.custom_headers),
+            auth_cookies=decrypt_dict(model.auth_cookies),
             allow_private_ips=bool(model.allow_private_ips),
         )
 
@@ -107,8 +110,19 @@ class ScopePolicy:
                 return True
         return False
 
+    def _normalize_path(self, path: str) -> str:
+        raw = path or "/"
+        if not raw.startswith("/"):
+            raw = "/" + raw
+        norm = posixpath.normpath(raw)
+        if not norm.startswith("/"):
+            norm = "/"
+        if raw.endswith("/") and norm != "/":
+            norm = norm + "/"
+        return norm
+
     def _is_path_excluded(self, path: str) -> bool:
-        norm_path = path or "/"
+        norm_path = self._normalize_path(path)
         for pat in self.excluded_paths:
             if not pat:
                 continue
@@ -116,7 +130,8 @@ class ScopePolicy:
                 if fnmatch.fnmatch(norm_path, pat):
                     return True
             else:
-                if norm_path == pat or norm_path.startswith(pat.rstrip("/") + "/"):
+                norm_pat = self._normalize_path(pat).rstrip("/")
+                if norm_path.rstrip("/") == norm_pat or norm_path.startswith(norm_pat + "/"):
                     return True
         return False
 
@@ -203,17 +218,19 @@ class ScopePolicy:
                     allowed = True
                     break
 
+        norm_req_path = self._normalize_path(path)
+
         # Check allowed_urls
         if not allowed:
             for raw_url in self.allowed_urls:
                 up = urlparse(raw_url if "://" in raw_url else f"https://{raw_url}")
                 u_host = (up.hostname or "").lower().rstrip(".")
                 u_port = up.port
-                u_path = (up.path or "/").rstrip("/")
+                u_path = self._normalize_path(up.path or "/").rstrip("/")
                 if host == u_host:
                     if u_port is not None and port is not None and u_port != port:
                         continue
-                    if not u_path or path == u_path or path.startswith(u_path + "/"):
+                    if not u_path or norm_req_path.rstrip("/") == u_path or norm_req_path.startswith(u_path + "/"):
                         allowed = True
                         if ip_obj is not None:
                             explicitly_ip_allowed = True

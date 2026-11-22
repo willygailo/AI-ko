@@ -13,14 +13,17 @@ from app.agents.graph_context import build_graph_context
 from app.core.events import event_bus
 from app.core.policy import approval_coordinator
 from app.core.scope import ScopePolicy, ScopeViolationError
+from app.core.vault import decrypt_or_passthrough
 from app.db.database import session_scope
 from app.db.models import (
     Engagement,
+    Hypothesis,
     LLMProfile,
     ScopePolicyModel,
     ToolRun,
 )
 from app.db.persistence import persist_tool_result
+from app.db.snapshots import capture_snapshot
 from app.knowledge.store import knowledge_store
 from app.llm.router import LLMProfileConfig, default_profile_from_settings, llm_router
 from app.llm.schemas import PlannerDecision, ProposedToolCall
@@ -75,7 +78,7 @@ class EngagementOrchestrator:
 
     async def _load_state(
         self,
-    ) -> tuple[Engagement, ScopePolicy, LLMProfileConfig]:
+    ) -> tuple[Engagement, ScopePolicy, LLMProfileConfig, list[LLMProfileConfig]]:
         async with session_scope() as session:
             eng = await session.get(Engagement, self.engagement_id)
             if not eng:
@@ -91,20 +94,79 @@ class EngagementOrchestrator:
                 raise ValueError(f"Scope policy missing for engagement {self.engagement_id}.")
             scope = ScopePolicy.from_orm(scope_row)
 
+            all_profiles = (await session.execute(select(LLMProfile))).scalars().all()
             llm_cfg = default_profile_from_settings()
+            fallbacks: list[LLMProfileConfig] = []
+
+            def _to_cfg(prof: LLMProfile) -> LLMProfileConfig:
+                return LLMProfileConfig(
+                    name=prof.name,
+                    provider=prof.provider,  # type: ignore[arg-type]
+                    base_url=prof.base_url,
+                    api_key=decrypt_or_passthrough(prof.api_key),
+                    fast_model=prof.fast_model,
+                    reasoning_model=prof.reasoning_model,
+                    redact_outbound=prof.redact_outbound,
+                )
+
             if eng.llm_profile_id:
-                prof = await session.get(LLMProfile, eng.llm_profile_id)
-                if prof:
-                    llm_cfg = LLMProfileConfig(
-                        name=prof.name,
-                        provider=prof.provider,  # type: ignore[arg-type]
-                        base_url=prof.base_url,
-                        api_key=prof.api_key,
-                        fast_model=prof.fast_model,
-                        reasoning_model=prof.reasoning_model,
-                        redact_outbound=prof.redact_outbound,
+                chosen = next((p for p in all_profiles if p.id == eng.llm_profile_id), None)
+                if chosen:
+                    llm_cfg = _to_cfg(chosen)
+            for p in all_profiles:
+                if p.id != eng.llm_profile_id:
+                    fallbacks.append(_to_cfg(p))
+
+            return eng, scope, llm_cfg, fallbacks
+
+    async def _persist_hypotheses(self, hypotheses: list[Any]) -> None:
+        if not hypotheses:
+            return
+        async with session_scope() as session:
+            for h in hypotheses[:10]:
+                existing = (
+                    await session.execute(
+                        select(Hypothesis).where(
+                            Hypothesis.engagement_id == self.engagement_id,
+                            Hypothesis.title == h.title,
+                            Hypothesis.target_url == h.target_url,
+                        )
                     )
-            return eng, scope, llm_cfg
+                ).scalar_one_or_none()
+                if not existing:
+                    session.add(
+                        Hypothesis(
+                            engagement_id=self.engagement_id,
+                            title=h.title[:300],
+                            target_url=h.target_url[:2048],
+                            parameter=h.parameter,
+                            cwe_id=h.cwe_id,
+                            confidence=h.confidence,
+                            status="proposed",
+                            rationale=h.rationale,
+                        )
+                    )
+
+    async def _update_hypothesis_outcome(
+        self, target: str, tool_name: str, new_findings: int
+    ) -> None:
+        if tool_name not in {"dalfox", "sqlmap", "http_probe", "nuclei"}:
+            return
+        async with session_scope() as session:
+            rows = (
+                await session.execute(
+                    select(Hypothesis).where(
+                        Hypothesis.engagement_id == self.engagement_id,
+                        Hypothesis.status.in_(["proposed", "testing", "awaiting_approval"]),
+                    )
+                )
+            ).scalars().all()
+            for row in rows:
+                if row.target_url == target or target.startswith(row.target_url) or row.target_url.startswith(target):
+                    row.status = "confirmed" if new_findings > 0 else "disproven"
+                    row.evidence_note = (
+                        f"Verified by `{tool_name}` ({new_findings} finding(s))."
+                    )
 
     async def _persist_tool_result(self, result: ToolResult) -> int:
         async with session_scope() as session:
@@ -293,6 +355,8 @@ class EngagementOrchestrator:
                 "new_findings": new_findings,
             },
         )
+        if tier == 3:
+            await self._update_hypothesis_outcome(norm_target, adapter.name, new_findings)
         return True
 
     async def _plan_next_step(
@@ -301,6 +365,7 @@ class EngagementOrchestrator:
         objective: str,
         graph: dict[str, Any],
         llm_cfg: LLMProfileConfig,
+        fallback_profiles: list[LLMProfileConfig] | None = None,
         step: int,
         max_steps: int,
         scope: ScopePolicy | None = None,
@@ -311,11 +376,33 @@ class EngagementOrchestrator:
         ep_tokens = " ".join(e.get("url", "") for e in graph.get("endpoints", [])[:15])
         playbooks = knowledge_store.search(f"{objective} {tech_tokens} {ep_tokens}", limit=4)
 
+        distilled_notes = ""
+        if len(graph.get("endpoints", [])) > 20 or len(graph.get("recent_runs", [])) > 8:
+            try:
+                distill = await llm_router.complete(
+                    profile=llm_cfg,
+                    fallback_profiles=fallback_profiles,
+                    tier="fast",
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": "Distill the top 3 untested high-risk endpoints/params from this graph in <=60 words.",
+                        },
+                        {"role": "user", "content": json.dumps(graph)[:4500]},
+                    ],
+                    max_tokens=160,
+                    max_retries=0,
+                )
+                distilled_notes = (distill.content or "").strip()
+            except Exception:
+                distilled_notes = ""
+
         user_prompt = json.dumps(
             {
                 "step": step,
                 "max_steps": max_steps,
                 "objective": objective,
+                "distilled_clues": distilled_notes,
                 "available_tools": [
                     {"name": t.name, "tier": t.tier, "description": t.description}
                     for t in tool_registry.list_tools()
@@ -329,6 +416,7 @@ class EngagementOrchestrator:
         try:
             raw = await llm_router.complete_json(
                 profile=llm_cfg,
+                fallback_profiles=fallback_profiles,
                 tier="reasoning",
                 messages=[
                     {"role": "system", "content": PLANNER_SYSTEM_PROMPT},
@@ -431,6 +519,23 @@ class EngagementOrchestrator:
             for ep in graph.get("endpoints", []):
                 q_params = ep.get("query_params") or []
                 u = ep.get("url") or ""
+                if not q_params:
+                    continue
+                redir_param = next(
+                    (p for p in q_params if p.lower() in {"next", "url", "redirect", "return", "dest", "to", "callback"}),
+                    None,
+                )
+                if redir_param and ("http_probe", u) not in ran_tools:
+                    proposals.append(
+                        ProposedToolCall(
+                            tool_name="http_probe",
+                            target=u,
+                            args={"mode": "open_redirect_probe", "param": redir_param},
+                            rationale=f"Verify open redirect behavior on parameter '{redir_param}'.",
+                            risk_summary="Tier 3 synthetic Location-reflection probe.",
+                        )
+                    )
+                    break
                 if q_params and ("dalfox", u) not in ran_tools:
                     proposals.append(
                         ProposedToolCall(
@@ -454,7 +559,7 @@ class EngagementOrchestrator:
                     )
                     break
 
-        # Propose Tier 3 auth-boundary replay if engagement has auth headers/cookies & API routes
+        # Propose Tier 3 differential BOLA/auth-boundary replay if engagement has auth headers/cookies & API routes
         if not proposals and scope and (scope.custom_headers or scope.auth_cookies):
             for ep in graph.get("endpoints", []):
                 u = ep.get("url") or ""
@@ -464,9 +569,9 @@ class EngagementOrchestrator:
                         ProposedToolCall(
                             tool_name="http_probe",
                             target=u,
-                            args={"mode": "replay_request", "method": "GET"},
-                            rationale="Verify authorization enforcement on discovered API endpoint.",
-                            risk_summary="Tier 3 authenticated/differential API replay.",
+                            args={"mode": "differential_bola", "method": "GET"},
+                            rationale="Verify authentication & object-level authorization boundary via differential replay.",
+                            risk_summary="Tier 3 authenticated vs unauthenticated API comparison.",
                         )
                     )
                     break
@@ -539,12 +644,13 @@ class EngagementOrchestrator:
 
     async def run(self) -> None:
         knowledge_store.ensure_indexed()
-        eng, scope, llm_cfg = await self._load_state()
+        eng, scope, llm_cfg, fallbacks = await self._load_state()
 
         async with session_scope() as session:
             e = await session.get(Engagement, self.engagement_id)
             if e:
                 e.status = "running"
+            await capture_snapshot(session, self.engagement_id, label="pre-scan")
 
         await event_bus.publish(
             engagement_id=self.engagement_id,
@@ -559,24 +665,26 @@ class EngagementOrchestrator:
             for dom in scope.primary_domains()[:3]:
                 if self._stop_requested:
                     break
-                await self._dispatch_tool(
-                    proposal=ProposedToolCall(
-                        tool_name="subfinder",
-                        target=dom,
-                        args={},
-                        rationale="Passive subdomain discovery for allowlisted domain.",
-                    ),
-                    scope=scope,
-                    autonomy_mode=eng.autonomy_mode,
-                    tier2_auto=eng.tier2_auto,
-                    agent_name="recon",
-                )
+                for d_tool, d_rat in [
+                    ("subfinder", "Passive subdomain discovery for allowlisted domain."),
+                    ("dnsx", "DNS record resolution & SPF/DMARC posture check."),
+                ]:
+                    if self._stop_requested:
+                        break
+                    await self._dispatch_tool(
+                        proposal=ProposedToolCall(tool_name=d_tool, target=dom, args={}, rationale=d_rat),
+                        scope=scope,
+                        autonomy_mode=eng.autonomy_mode,
+                        tier2_auto=eng.tier2_auto,
+                        agent_name="recon",
+                    )
 
             for seed_url in scope.primary_seed_urls()[:3]:
                 if self._stop_requested:
                     break
                 recon_steps: list[tuple[str, dict[str, Any], str]] = [
                     ("http_probe", {"mode": "passive_audit"}, "Initial HTTP security header, CORS, cookie, JWT & OpenAPI probe."),
+                    ("js_miner", {"max_bundles": 8}, "Extract hidden API routes and potential credential leaks from JS bundles."),
                     ("whatweb", {"aggression": 1}, "Passive web technology stack fingerprinting."),
                     ("wafw00f", {}, "Detect protective WAF/CDN controls."),
                     ("katana", {"depth": 2, "js_crawl": True}, "Crawl HTML & JavaScript routes for endpoints and parameters."),
@@ -618,10 +726,13 @@ class EngagementOrchestrator:
                     objective=eng.objective,
                     graph=graph,
                     llm_cfg=llm_cfg,
+                    fallback_profiles=fallbacks,
                     step=step,
                     max_steps=eng.max_steps,
                     scope=scope,
                 )
+
+                await self._persist_hypotheses(decision.hypotheses)
 
                 await event_bus.publish(
                     engagement_id=self.engagement_id,
@@ -664,6 +775,7 @@ class EngagementOrchestrator:
                 e = await session.get(Engagement, self.engagement_id)
                 if e:
                     e.status = final_status
+                await capture_snapshot(session, self.engagement_id, label=f"post-scan-{final_status}")
             await event_bus.publish(
                 engagement_id=self.engagement_id,
                 event_type="engagement_finished",

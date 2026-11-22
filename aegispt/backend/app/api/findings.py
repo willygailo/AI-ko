@@ -5,10 +5,11 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.schemas import FindingUpdateInput
+from app.api.schemas import FindingCreateInput, FindingUpdateInput, HypothesisUpdateInput
 from app.core.auth import require_api_token
 from app.db.database import get_db
-from app.db.models import Finding
+from app.db.models import Engagement, Finding, Hypothesis
+from app.tools.base import fingerprint_finding
 
 router = APIRouter(
     prefix="/api/v1",
@@ -74,3 +75,53 @@ async def update_finding(
         "status": finding.status,
         "severity": finding.severity,
     }
+
+
+@router.post("/engagements/{engagement_id}/findings", status_code=201)
+async def create_manual_finding(
+    engagement_id: str,
+    body: FindingCreateInput,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, object]:
+    eng = await db.get(Engagement, engagement_id)
+    if not eng:
+        raise HTTPException(status_code=404, detail="Engagement not found.")
+    fp = fingerprint_finding("repeater", body.title, body.target_url, body.parameter)
+    finding = Finding(
+        engagement_id=engagement_id,
+        title=body.title,
+        severity=body.severity,
+        status="confirmed",
+        cvss_score=body.cvss_score,
+        cwe_id=body.cwe_id,
+        owasp_category=body.owasp_category,
+        target_url=body.target_url,
+        parameter=body.parameter,
+        description=body.description,
+        evidence=body.evidence,
+        poc_command=body.poc_command,
+        remediation=body.remediation,
+        tool_source="repeater",
+        fingerprint=fp,
+    )
+    db.add(finding)
+    await db.commit()
+    await db.refresh(finding)
+    return {"id": finding.id, "title": finding.title, "severity": finding.severity}
+
+
+@router.patch("/hypotheses/{hypothesis_id}")
+async def update_hypothesis(
+    hypothesis_id: str,
+    body: HypothesisUpdateInput,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, object]:
+    hyp = await db.get(Hypothesis, hypothesis_id)
+    if not hyp:
+        raise HTTPException(status_code=404, detail="Hypothesis not found.")
+    hyp.status = body.status
+    if body.evidence_note is not None:
+        hyp.evidence_note = body.evidence_note
+    await db.commit()
+    await db.refresh(hyp)
+    return {"id": hyp.id, "status": hyp.status, "evidence_note": hyp.evidence_note}

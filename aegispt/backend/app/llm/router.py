@@ -1,6 +1,7 @@
 """Provider-agnostic async LLM Router (Ollama + OpenAI-compatible vLLM/llama.cpp/APIs)."""
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -70,59 +71,79 @@ class LLMRouter:
         self,
         *,
         profile: LLMProfileConfig | None = None,
+        fallback_profiles: list[LLMProfileConfig] | None = None,
         tier: Literal["fast", "reasoning"] = "reasoning",
         messages: list[dict[str, str]],
         json_mode: bool = False,
         temperature: float = 0.2,
         max_tokens: int = 1600,
+        max_retries: int = 2,
     ) -> LLMCompletionResult:
-        cfg = profile or default_profile_from_settings()
-        model = cfg.fast_model if tier == "fast" else cfg.reasoning_model
+        candidates = [profile or default_profile_from_settings(), *(fallback_profiles or [])]
+        last_exc: Exception | None = None
 
-        redactor: SecretRedactor | None = None
-        prepared_messages = messages
-        redacted_applied = False
-        if cfg.redact_outbound and not cfg.is_local_endpoint:
-            redactor = SecretRedactor()
-            prepared_messages = [
-                {
-                    "role": m["role"],
-                    "content": redactor.redact(m.get("content", "")),
-                }
-                for m in messages
-            ]
-            redacted_applied = True
+        for cfg in candidates:
+            model = cfg.fast_model if tier == "fast" else cfg.reasoning_model
+            redactor: SecretRedactor | None = None
+            prepared_messages = messages
+            redacted_applied = False
+            if cfg.redact_outbound and not cfg.is_local_endpoint:
+                redactor = SecretRedactor()
+                prepared_messages = [
+                    {
+                        "role": m["role"],
+                        "content": redactor.redact(m.get("content", "")),
+                    }
+                    for m in messages
+                ]
+                redacted_applied = True
 
-        if cfg.provider == "ollama":
-            res = await self._call_ollama(
-                cfg=cfg,
-                model=model,
-                messages=prepared_messages,
-                json_mode=json_mode,
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
-        elif cfg.provider == "openai_compat":
-            res = await self._call_openai_compat(
-                cfg=cfg,
-                model=model,
-                messages=prepared_messages,
-                json_mode=json_mode,
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
-        else:
-            raise ValueError(f"Unsupported LLM provider: {cfg.provider}")
+            for attempt in range(max_retries + 1):
+                try:
+                    if cfg.provider == "ollama":
+                        res = await self._call_ollama(
+                            cfg=cfg,
+                            model=model,
+                            messages=prepared_messages,
+                            json_mode=json_mode,
+                            temperature=temperature,
+                            max_tokens=max_tokens,
+                        )
+                    elif cfg.provider == "openai_compat":
+                        res = await self._call_openai_compat(
+                            cfg=cfg,
+                            model=model,
+                            messages=prepared_messages,
+                            json_mode=json_mode,
+                            temperature=temperature,
+                            max_tokens=max_tokens,
+                        )
+                    else:
+                        raise ValueError(f"Unsupported LLM provider: {cfg.provider}")
 
-        if redactor is not None:
-            res.content = redactor.restore(res.content)
-        res.redacted_applied = redacted_applied
-        return res
+                    if redactor is not None:
+                        res.content = redactor.restore(res.content)
+                    res.redacted_applied = redacted_applied
+                    return res
+                except Exception as exc:
+                    last_exc = exc
+                    is_transient = isinstance(exc, (httpx.TimeoutException, httpx.ConnectError)) or (
+                        isinstance(exc, httpx.HTTPStatusError)
+                        and exc.response.status_code in {429, 500, 502, 503, 504}
+                    )
+                    if is_transient and attempt < max_retries:
+                        await asyncio.sleep(0.4 * (2**attempt))
+                        continue
+                    break
+
+        assert last_exc is not None
+        raise last_exc
 
     async def complete_json(
         self,
         *,
         profile: LLMProfileConfig | None = None,
+        fallback_profiles: list[LLMProfileConfig] | None = None,
         tier: Literal["fast", "reasoning"] = "reasoning",
         messages: list[dict[str, str]],
         temperature: float = 0.15,
@@ -130,6 +151,7 @@ class LLMRouter:
     ) -> dict[str, Any]:
         res = await self.complete(
             profile=profile,
+            fallback_profiles=fallback_profiles,
             tier=tier,
             messages=messages,
             json_mode=True,

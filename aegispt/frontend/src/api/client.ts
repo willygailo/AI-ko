@@ -108,6 +108,50 @@ export interface AgentEventItem {
   created_at: string | null;
 }
 
+export interface HypothesisItem {
+  id: string;
+  title: string;
+  target_url: string;
+  parameter: string | null;
+  cwe_id: string | null;
+  confidence: string;
+  status: "proposed" | "testing" | "awaiting_approval" | "confirmed" | "disproven";
+  rationale: string;
+  evidence_note: string;
+  updated_at: string | null;
+}
+
+export interface SnapshotItem {
+  id: string;
+  label: string;
+  assets_count: number;
+  endpoints_count: number;
+  findings_count: number;
+  created_at: string | null;
+}
+
+export interface ScanDiffResponse {
+  has_diff: boolean;
+  snapshots_count: number;
+  baseline?: { id: string; label: string; created_at: string | null };
+  current?: { id: string; label: string; created_at: string | null };
+  new_assets?: string[];
+  removed_assets?: string[];
+  new_endpoints?: string[];
+  new_findings?: string[];
+  resolved_findings?: string[];
+  new_open_ports?: string[];
+}
+
+export interface RepeaterResponse {
+  status_code: number;
+  final_url: string;
+  duration_ms: number;
+  headers: Record<string, string>;
+  body: string;
+  curl_command: string;
+}
+
 export interface EngagementDetail extends Engagement {
   assets: AssetItem[];
   endpoints: EndpointItem[];
@@ -115,6 +159,8 @@ export interface EngagementDetail extends Engagement {
   approvals: ApprovalItem[];
   findings: FindingItem[];
   events: AgentEventItem[];
+  hypotheses: HypothesisItem[];
+  snapshots: SnapshotItem[];
 }
 
 export interface LLMProfileItem {
@@ -216,6 +262,55 @@ export const api = {
   updateFinding: (findingId: string, payload: { status?: string; severity?: string }) =>
     apiFetch(`/api/v1/findings/${findingId}`, {
       method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+  createFinding: (
+    engagementId: string,
+    payload: {
+      title: string;
+      severity: string;
+      target_url: string;
+      parameter?: string | null;
+      cwe_id?: string | null;
+      description: string;
+      evidence: Record<string, unknown>;
+      poc_command?: string | null;
+      remediation?: string;
+    }
+  ) =>
+    apiFetch(`/api/v1/engagements/${engagementId}/findings`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  updateHypothesis: (hypothesisId: string, payload: { status: string; evidence_note?: string }) =>
+    apiFetch(`/api/v1/hypotheses/${hypothesisId}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+  createSnapshot: (engagementId: string, label: string) =>
+    apiFetch<SnapshotItem>(`/api/v1/engagements/${engagementId}/snapshots?label=${encodeURIComponent(label)}`, {
+      method: "POST",
+    }),
+  getScanDiff: (engagementId: string, base?: string, target?: string) => {
+    const qs = new URLSearchParams();
+    if (base) qs.set("base", base);
+    if (target) qs.set("target", target);
+    const qStr = qs.toString();
+    return apiFetch<ScanDiffResponse>(`/api/v1/engagements/${engagementId}/diff${qStr ? `?${qStr}` : ""}`);
+  },
+  runRepeater: (
+    engagementId: string,
+    payload: {
+      method: string;
+      url: string;
+      headers: Record<string, string>;
+      body?: string | null;
+      use_engagement_auth: boolean;
+      follow_redirects: boolean;
+    }
+  ) =>
+    apiFetch<RepeaterResponse>(`/api/v1/engagements/${engagementId}/repeater`, {
+      method: "POST",
       body: JSON.stringify(payload),
     }),
   listLLMProfiles: () => apiFetch<{ profiles: LLMProfileItem[] }>("/api/v1/llm-profiles"),

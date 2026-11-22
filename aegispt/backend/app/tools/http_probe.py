@@ -2,15 +2,17 @@
 from __future__ import annotations
 
 import base64
+import difflib
 import json
 import re
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import parse_qs, urljoin, urlparse
+from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse
 
 import httpx
 from pydantic import BaseModel, Field
 
+from app.core.ratelimit import TokenBucketRateLimiter, rate_limiters
 from app.core.scope import ScopePolicy
 from app.tools.base import (
     BaseToolAdapter,
@@ -127,10 +129,19 @@ def audit_jwt_candidates(tokens: list[str], target_url: str, tool_source: str) -
 
 
 class HttpProbeArgs(BaseModel):
-    mode: Literal["passive_audit", "api_discovery", "replay_request"] = "passive_audit"
+    mode: Literal[
+        "passive_audit",
+        "api_discovery",
+        "replay_request",
+        "differential_bola",
+        "ssti_probe",
+        "open_redirect_probe",
+    ] = "passive_audit"
     method: Literal["GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"] = "GET"
     headers: dict[str, str] = Field(default_factory=dict)
+    secondary_headers: dict[str, str] = Field(default_factory=dict)
     body: str | None = None
+    param: str | None = None
     follow_redirects: bool = True
     check_cors: bool = True
     discover_api_schemas: bool = True
@@ -141,8 +152,8 @@ class HttpProbeAdapter(BaseToolAdapter):
     name = "http_probe"
     description = (
         "Native async HTTP/API analyzer: inspects status, tech headers, missing security headers, "
-        "CORS policy, cookie security flags, robots.txt, and OpenAPI/Swagger/GraphQL endpoints; "
-        "supports approval-gated custom request replay."
+        "CORS, cookies, JWTs, OpenAPI/GraphQL; supports approval-gated request replay, "
+        "differential BOLA/IDOR checks, benign SSTI checks, and open-redirect checks."
     )
     tier = 1
     binary_name = None
@@ -150,9 +161,49 @@ class HttpProbeAdapter(BaseToolAdapter):
 
     def effective_tier(self, args: BaseModel) -> int:
         assert isinstance(args, HttpProbeArgs)
-        if args.mode == "replay_request" or args.method in {"POST", "PUT", "PATCH", "DELETE"}:
+        if args.mode in {"replay_request", "differential_bola", "ssti_probe", "open_redirect_probe"} or args.method in {"POST", "PUT", "PATCH", "DELETE"}:
             return 3
         return 1
+
+    async def _safe_request(
+        self,
+        client: httpx.AsyncClient,
+        method: str,
+        url: str,
+        *,
+        scope: ScopePolicy,
+        limiter: TokenBucketRateLimiter,
+        headers: dict[str, str],
+        content: str | None = None,
+        cookies: dict[str, str] | None = None,
+        follow_redirects: bool = True,
+        max_hops: int = 5,
+    ) -> httpx.Response:
+        current_url = url
+        current_method = method
+        current_body = content
+        for _ in range(max_hops + 1):
+            scope.validate_target(current_url, resolve_dns=True)
+            await limiter.acquire()
+            resp = await client.request(
+                current_method,
+                current_url,
+                headers=headers,
+                content=current_body,
+                cookies=cookies,
+            )
+            if not follow_redirects or resp.status_code not in {301, 302, 303, 307, 308}:
+                return resp
+            loc = resp.headers.get("location")
+            if not loc:
+                return resp
+            next_url = urljoin(current_url, loc)
+            scope.validate_target(next_url, resolve_dns=True)
+            current_url = next_url
+            if resp.status_code == 303:
+                current_method = "GET"
+                current_body = None
+        return resp
 
     def build_argv(self, target: str, args: BaseModel, scope: ScopePolicy, work_dir: Path) -> list[str]:
         assert isinstance(args, HttpProbeArgs)
@@ -180,19 +231,24 @@ class HttpProbeAdapter(BaseToolAdapter):
         findings: list[DiscoveredFinding] = []
         transcript: list[str] = []
 
+        limiter = rate_limiters.get(engagement_id, scope.max_rps)
         is_local = (urlparse(target).hostname or "").lower() in {"127.0.0.1", "localhost", "::1"}
         async with httpx.AsyncClient(
             verify=False,
-            follow_redirects=args.follow_redirects,
+            follow_redirects=False,
             timeout=float(args.timeout_seconds),
-            cookies=cookies,
             trust_env=not is_local,
         ) as client:
-            resp = await client.request(
+            resp = await self._safe_request(
+                client,
                 args.method,
                 target,
+                scope=scope,
+                limiter=limiter,
                 headers=merged_headers,
                 content=args.body,
+                cookies=cookies,
+                follow_redirects=args.follow_redirects,
             )
             final_url = str(resp.url)
             scope.validate_target(final_url, resolve_dns=False)
@@ -323,9 +379,15 @@ class HttpProbeAdapter(BaseToolAdapter):
 
                 # CORS check with benign Origin header
                 if args.check_cors:
-                    cors_resp = await client.get(
+                    cors_resp = await self._safe_request(
+                        client,
+                        "GET",
                         final_url,
+                        scope=scope,
+                        limiter=limiter,
                         headers={**merged_headers, "Origin": "https://aegispt-cors-check.invalid"},
+                        cookies=cookies,
+                        follow_redirects=False,
                     )
                     acao = cors_resp.headers.get("access-control-allow-origin", "")
                     acac = cors_resp.headers.get("access-control-allow-credentials", "").lower()
@@ -360,8 +422,16 @@ class HttpProbeAdapter(BaseToolAdapter):
                 for path in API_SCHEMA_PATHS:
                     candidate = urljoin(base_origin, path)
                     try:
-                        scope.validate_target(candidate, resolve_dns=False)
-                        r = await client.get(candidate, headers=merged_headers)
+                        r = await self._safe_request(
+                            client,
+                            "GET",
+                            candidate,
+                            scope=scope,
+                            limiter=limiter,
+                            headers=merged_headers,
+                            cookies=cookies,
+                            follow_redirects=False,
+                        )
                     except Exception:
                         continue
                     if r.status_code in (200, 401, 403):
@@ -414,9 +484,12 @@ class HttpProbeAdapter(BaseToolAdapter):
                             )
                             # Safe non-mutating GraphQL introspection probe
                             try:
+                                scope.validate_target(candidate, resolve_dns=False)
+                                await limiter.acquire()
                                 gql_r = await client.post(
                                     candidate,
                                     headers={**merged_headers, "Content-Type": "application/json"},
+                                    cookies=cookies,
                                     json={"query": "{__schema{queryType{name}}}"},
                                 )
                                 if gql_r.status_code == 200 and "__schema" in gql_r.text:
@@ -451,6 +524,138 @@ class HttpProbeAdapter(BaseToolAdapter):
                                                 source="robots_txt",
                                             )
                                         )
+
+            # Tier-3 Active Verification Modes
+            if args.mode == "differential_bola":
+                unauth_headers = {"User-Agent": "AegisPT-SecurityProbe/0.1", **args.secondary_headers}
+                unauth_resp = await self._safe_request(
+                    client,
+                    args.method,
+                    target,
+                    scope=scope,
+                    limiter=limiter,
+                    headers=unauth_headers,
+                    content=args.body,
+                    cookies={},
+                    follow_redirects=False,
+                )
+                ratio = difflib.SequenceMatcher(
+                    None, resp.text[:4000], unauth_resp.text[:4000]
+                ).ratio()
+                if (
+                    resp.status_code in range(200, 300)
+                    and unauth_resp.status_code in range(200, 300)
+                    and len(unauth_resp.text.strip()) >= 20
+                    and ratio >= 0.85
+                ):
+                    findings.append(
+                        DiscoveredFinding(
+                            title="Potential Missing Authorization / BOLA on Endpoint",
+                            severity="high",
+                            target_url=final_url,
+                            cwe_id="CWE-862",
+                            owasp_category="API1:2023 - Broken Object Level Authorization",
+                            cvss_score=7.5,
+                            description=(
+                                f"Unauthenticated/secondary request returned HTTP {unauth_resp.status_code} "
+                                f"with {round(ratio * 100, 1)}% body similarity to authenticated request ({resp.status_code})."
+                            ),
+                            evidence={
+                                "auth_status": resp.status_code,
+                                "unauth_status": unauth_resp.status_code,
+                                "similarity": round(ratio, 3),
+                                "unauth_preview": unauth_resp.text[:400],
+                            },
+                            poc_command=f"curl -i -s '{target}'",
+                            remediation="Enforce server-side session authentication and object-level ownership checks on every API route.",
+                            tool_source=self.name,
+                        )
+                    )
+
+            elif args.mode == "ssti_probe":
+                p_url = urlparse(target)
+                q_map = parse_qs(p_url.query, keep_blank_values=True)
+                target_params = [args.param] if args.param else list(q_map.keys())[:3]
+                baseline_has_eval = "1850" in resp.text
+                for pname in target_params:
+                    if not pname or baseline_has_eval:
+                        continue
+                    for payload in ("{{37*50}}", "${37*50}", "<%= 37*50 %>"):
+                        mut_q = {k: list(v) for k, v in q_map.items()}
+                        mut_q[pname] = [payload]
+                        test_url = urlunparse(p_url._replace(query=urlencode(mut_q, doseq=True)))
+                        r_ssti = await self._safe_request(
+                            client,
+                            "GET",
+                            test_url,
+                            scope=scope,
+                            limiter=limiter,
+                            headers=merged_headers,
+                            cookies=cookies,
+                            follow_redirects=False,
+                        )
+                        if "1850" in r_ssti.text and payload not in r_ssti.text:
+                            findings.append(
+                                DiscoveredFinding(
+                                    title=f"Server-Side Template Injection (SSTI) on '{pname}'",
+                                    severity="critical",
+                                    target_url=final_url,
+                                    parameter=pname,
+                                    cwe_id="CWE-1336",
+                                    owasp_category="A03:2021 - Injection",
+                                    cvss_score=9.4,
+                                    description=f"Benign mathematical expression `{payload}` evaluated to `1850` in server response.",
+                                    evidence={"parameter": pname, "payload": payload, "probe_url": test_url},
+                                    poc_command=f"curl -s '{test_url}'",
+                                    remediation="Avoid passing untrusted input into template compilation; use logic-less templates or strict context escaping.",
+                                    tool_source=self.name,
+                                )
+                            )
+                            break
+
+            elif args.mode == "open_redirect_probe":
+                p_url = urlparse(target)
+                q_map = parse_qs(p_url.query, keep_blank_values=True)
+                candidates = (
+                    [args.param]
+                    if args.param
+                    else [k for k in q_map.keys() if k.lower() in {"next", "url", "redirect", "return", "dest", "to", "callback"}]
+                )
+                probe_dest = "https://aegispt-redirect-check.invalid/probe"
+                for pname in candidates[:3]:
+                    if not pname:
+                        continue
+                    mut_q = {k: list(v) for k, v in q_map.items()}
+                    mut_q[pname] = [probe_dest]
+                    test_url = urlunparse(p_url._replace(query=urlencode(mut_q, doseq=True)))
+                    r_redir = await self._safe_request(
+                        client,
+                        "GET",
+                        test_url,
+                        scope=scope,
+                        limiter=limiter,
+                        headers=merged_headers,
+                        cookies=cookies,
+                        follow_redirects=False,
+                    )
+                    loc = r_redir.headers.get("location", "")
+                    if r_redir.status_code in {301, 302, 303, 307, 308} and "aegispt-redirect-check.invalid" in loc:
+                        findings.append(
+                            DiscoveredFinding(
+                                title=f"Open Redirect on Parameter '{pname}'",
+                                severity="medium",
+                                target_url=final_url,
+                                parameter=pname,
+                                cwe_id="CWE-601",
+                                owasp_category="A01:2021 - Broken Access Control",
+                                cvss_score=5.4,
+                                description=f"Endpoint redirected Location header to external domain via parameter '{pname}'.",
+                                evidence={"parameter": pname, "location": loc, "status_code": r_redir.status_code},
+                                poc_command=f"curl -I -s '{test_url}' | grep -i location",
+                                remediation="Validate redirect destinations against a strict server-side allowlist of relative paths or trusted domains.",
+                                tool_source=self.name,
+                            )
+                        )
 
         return ToolResult(
             tool_name=self.name,

@@ -47,6 +47,35 @@ class FindingUpdateInput(BaseModel):
     severity: Literal["critical", "high", "medium", "low", "info"] | None = None
 
 
+class FindingCreateInput(BaseModel):
+    title: str = Field(min_length=2, max_length=300)
+    severity: Literal["critical", "high", "medium", "low", "info"] = "medium"
+    target_url: str
+    parameter: str | None = None
+    cwe_id: str | None = None
+    owasp_category: str | None = None
+    cvss_score: float | None = None
+    description: str = ""
+    evidence: dict[str, Any] = Field(default_factory=dict)
+    poc_command: str | None = None
+    remediation: str = ""
+
+
+class HypothesisUpdateInput(BaseModel):
+    status: Literal["proposed", "testing", "awaiting_approval", "confirmed", "disproven"]
+    evidence_note: str | None = None
+
+
+class RepeaterRequestInput(BaseModel):
+    method: Literal["GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"] = "GET"
+    url: str
+    headers: dict[str, str] = Field(default_factory=dict)
+    body: str | None = None
+    use_engagement_auth: bool = True
+    follow_redirects: bool = False
+    timeout_seconds: int = Field(default=20, ge=3, le=60)
+
+
 class LLMProfileCreate(BaseModel):
     name: str = Field(min_length=2, max_length=120)
     provider: Literal["ollama", "openai_compat"]

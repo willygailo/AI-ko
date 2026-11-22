@@ -1,11 +1,11 @@
-"""Compact Attack-Surface Graph serializer for token-efficient LLM reasoning."""
+"""Compact Attack-Surface Graph serializer for token-efficient reflective LLM reasoning."""
 from __future__ import annotations
 
 from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Asset, Endpoint, Finding, ToolRun
+from app.db.models import Asset, Endpoint, Finding, Hypothesis, ToolRun
 
 
 async def build_graph_context(session: AsyncSession, engagement_id: str) -> dict[str, Any]:
@@ -30,6 +30,14 @@ async def build_graph_context(session: AsyncSession, engagement_id: str) -> dict
     findings = (
         await session.execute(
             select(Finding).where(Finding.engagement_id == engagement_id).limit(40)
+        )
+    ).scalars().all()
+    hypotheses = (
+        await session.execute(
+            select(Hypothesis)
+            .where(Hypothesis.engagement_id == engagement_id)
+            .order_by(Hypothesis.updated_at.desc())
+            .limit(30)
         )
     ).scalars().all()
 
@@ -62,6 +70,7 @@ async def build_graph_context(session: AsyncSession, engagement_id: str) -> dict
                 "target": r.target,
                 "status": r.status,
                 "summary": r.summary,
+                "error": r.error_message,
             }
             for r in runs
         ],
@@ -74,5 +83,15 @@ async def build_graph_context(session: AsyncSession, engagement_id: str) -> dict
                 "status": f.status,
             }
             for f in findings
+        ],
+        "hypotheses": [
+            {
+                "title": h.title,
+                "target_url": h.target_url,
+                "parameter": h.parameter,
+                "cwe_id": h.cwe_id,
+                "status": h.status,
+            }
+            for h in hypotheses
         ],
     }

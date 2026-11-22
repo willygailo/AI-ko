@@ -323,6 +323,67 @@ def report(
         console.print(resp.text)
 
 
+@app.command()
+def hypotheses(engagement_id: str = typer.Argument(..., help="Engagement ID")) -> None:
+    """List AI-generated security hypotheses and verification status."""
+    client = AegisClient()
+    items = client.get(f"/api/v1/engagements/{engagement_id}/hypotheses").json().get("hypotheses", [])
+    table = Table(title=f"Hypotheses for {engagement_id} ({len(items)})")
+    table.add_column("Status")
+    table.add_column("Confidence")
+    table.add_column("CWE")
+    table.add_column("Title")
+    table.add_column("Target")
+    for h in items:
+        table.add_row(h["status"], h["confidence"], h.get("cwe_id") or "-", h["title"], h["target_url"])
+    console.print(table)
+
+
+@app.command()
+def diff(engagement_id: str = typer.Argument(..., help="Engagement ID")) -> None:
+    """Compare baseline vs latest scan snapshot deltas for an engagement."""
+    client = AegisClient()
+    data = client.get(f"/api/v1/engagements/{engagement_id}/diff").json()
+    if not data.get("has_diff"):
+        console.print(f"[yellow]Need at least 2 snapshots to compute diff (found {data.get('snapshots_count', 0)}).[/yellow]")
+        return
+    console.print(
+        Panel(
+            f"Baseline: {data['baseline']['label']} -> Current: {data['current']['label']}\n"
+            f"+ New Assets: {len(data['new_assets'])}\n"
+            f"+ New Endpoints: {len(data['new_endpoints'])}\n"
+            f"+ New Findings: {len(data['new_findings'])}\n"
+            f"- Resolved Findings: {len(data['resolved_findings'])}\n"
+            f"+ New Open Ports: {len(data['new_open_ports'])}",
+            title="Scan Snapshot Delta",
+            border_style="cyan",
+        )
+    )
+
+
+@app.command()
+def repeat(
+    engagement_id: str = typer.Argument(..., help="Engagement ID"),
+    url: str = typer.Argument(..., help="Target URL inside engagement scope"),
+    method: str = typer.Option("GET", "--method", "-X", help="HTTP method"),
+    body: Optional[str] = typer.Option(None, "--data", "-d", help="Optional request body"),
+) -> None:
+    """Send an interactive scoped HTTP request through the AegisPT Repeater."""
+    client = AegisClient()
+    res = client.post(
+        f"/api/v1/engagements/{engagement_id}/repeater",
+        json_body={"method": method.upper(), "url": url, "body": body},
+    ).json()
+    console.print(
+        Panel(
+            f"HTTP {res['status_code']} ({res['duration_ms']}ms) — {res['final_url']}\n\n"
+            f"{res['body'][:2000]}",
+            title=f"Repeater Response ({method.upper()})",
+            border_style="green" if res["status_code"] < 400 else "yellow",
+        )
+    )
+
+
 def main() -> None:
     app(prog_name="aegispt")
 

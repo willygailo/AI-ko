@@ -16,6 +16,7 @@ from pydantic import BaseModel
 
 from app.config import get_settings
 from app.core.events import event_bus
+from app.core.redactor import SecretRedactor
 from app.core.scope import ScopePolicy, ScopeViolationError
 
 
@@ -194,7 +195,8 @@ class BaseToolAdapter(ABC):
                 work_dir=run_dir,
             )
             result.duration_ms = int((time.monotonic() - start) * 1000)
-            log_path.write_text(result.stdout or "", encoding="utf-8", errors="replace")
+            scrubbed = SecretRedactor().redact(result.stdout or "")
+            log_path.write_text(scrubbed, encoding="utf-8", errors="replace")
             result.raw_log_path = str(log_path)
             return result
 
@@ -263,8 +265,12 @@ class BaseToolAdapter(ABC):
         duration_ms = int((time.monotonic() - start) * 1000)
         stdout_str = b"".join(stdout_chunks).decode("utf-8", errors="replace")
         stderr_str = b"".join(stderr_chunks).decode("utf-8", errors="replace")
+        redactor = SecretRedactor()
+        safe_argv = redactor.redact(" ".join(argv))
+        safe_stdout = redactor.redact(stdout_str)
+        safe_stderr = redactor.redact(stderr_str)
         log_path.write_text(
-            f"# ARGV: {' '.join(argv)}\n\n# STDOUT\n{stdout_str}\n\n# STDERR\n{stderr_str}\n",
+            f"# ARGV: {safe_argv}\n\n# STDOUT\n{safe_stdout}\n\n# STDERR\n{safe_stderr}\n",
             encoding="utf-8",
             errors="replace",
         )

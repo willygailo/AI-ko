@@ -3,18 +3,23 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlparse
+import time
 
-from fastapi import APIRouter, Depends, HTTPException
+import httpx
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.orchestrator import orchestrator_manager
-from app.api.schemas import EngagementCreate, ManualToolRunInput
+from app.api.schemas import EngagementCreate, ManualToolRunInput, RepeaterRequestInput
 from app.config import get_settings
 from app.core.auth import require_api_token
 from app.core.events import event_bus
 from app.core.policy import approval_coordinator
+from app.core.ratelimit import rate_limiters
 from app.core.scope import ScopePolicy, ScopeViolationError
+from app.core.vault import encrypt_dict
 from app.db.database import get_db
 from app.db.models import (
     AgentEvent,
@@ -23,10 +28,14 @@ from app.db.models import (
     Endpoint,
     Engagement,
     Finding,
+    Hypothesis,
+    ScanSnapshot,
     ScopePolicyModel,
     ToolRun,
 )
 from app.db.persistence import persist_tool_result
+from app.db.snapshots import capture_snapshot, compute_snapshot_diff
+from app.tools.http_probe import HttpProbeAdapter
 from app.tools.registry import tool_registry
 
 router = APIRouter(
@@ -60,7 +69,8 @@ def _serialize_engagement(e: Engagement, scope: ScopePolicyModel | None = None) 
             "excluded_paths": scope.excluded_paths,
             "max_rps": scope.max_rps,
             "max_concurrency": scope.max_concurrency,
-            "custom_headers": scope.custom_headers,
+            "custom_headers": {k: "***" for k in (scope.custom_headers or {}).keys()},
+            "custom_header_keys": sorted((scope.custom_headers or {}).keys()),
             "auth_cookies_keys": sorted((scope.auth_cookies or {}).keys()),
             "allow_private_ips": scope.allow_private_ips,
         }
@@ -129,8 +139,8 @@ async def create_engagement(body: EngagementCreate, db: AsyncSession = Depends(g
         excluded_paths=body.scope.excluded_paths,
         max_rps=body.scope.max_rps,
         max_concurrency=body.scope.max_concurrency,
-        custom_headers=body.scope.custom_headers,
-        auth_cookies=body.scope.auth_cookies,
+        custom_headers=encrypt_dict(body.scope.custom_headers),
+        auth_cookies=encrypt_dict(body.scope.auth_cookies),
         allow_private_ips=body.scope.allow_private_ips,
     )
     db.add(scope)
@@ -183,6 +193,20 @@ async def get_engagement(engagement_id: str, db: AsyncSession = Depends(get_db))
             .where(AgentEvent.engagement_id == engagement_id)
             .order_by(AgentEvent.id.desc())
             .limit(100)
+        )
+    ).scalars().all()
+    hypotheses = (
+        await db.execute(
+            select(Hypothesis)
+            .where(Hypothesis.engagement_id == engagement_id)
+            .order_by(Hypothesis.updated_at.desc())
+        )
+    ).scalars().all()
+    snapshots = (
+        await db.execute(
+            select(ScanSnapshot)
+            .where(ScanSnapshot.engagement_id == engagement_id)
+            .order_by(ScanSnapshot.created_at.asc())
         )
     ).scalars().all()
 
@@ -280,6 +304,32 @@ async def get_engagement(engagement_id: str, db: AsyncSession = Depends(get_db))
                 "created_at": ev.created_at.isoformat() if ev.created_at else None,
             }
             for ev in reversed(events)
+        ],
+        "hypotheses": [
+            {
+                "id": h.id,
+                "title": h.title,
+                "target_url": h.target_url,
+                "parameter": h.parameter,
+                "cwe_id": h.cwe_id,
+                "confidence": h.confidence,
+                "status": h.status,
+                "rationale": h.rationale,
+                "evidence_note": h.evidence_note,
+                "updated_at": h.updated_at.isoformat() if h.updated_at else None,
+            }
+            for h in hypotheses
+        ],
+        "snapshots": [
+            {
+                "id": s.id,
+                "label": s.label,
+                "assets_count": s.assets_count,
+                "endpoints_count": s.endpoints_count,
+                "findings_count": s.findings_count,
+                "created_at": s.created_at.isoformat() if s.created_at else None,
+            }
+            for s in snapshots
         ],
     }
 
@@ -421,3 +471,145 @@ async def get_run_log(
     if not p.is_file():
         return {"log": ""}
     return {"log": p.read_text(encoding="utf-8", errors="replace")[:200000]}
+
+
+@router.get("/{engagement_id}/hypotheses")
+async def list_hypotheses(engagement_id: str, db: AsyncSession = Depends(get_db)) -> dict[str, object]:
+    rows = (
+        await db.execute(
+            select(Hypothesis)
+            .where(Hypothesis.engagement_id == engagement_id)
+            .order_by(Hypothesis.updated_at.desc())
+        )
+    ).scalars().all()
+    return {
+        "hypotheses": [
+            {
+                "id": h.id,
+                "title": h.title,
+                "target_url": h.target_url,
+                "parameter": h.parameter,
+                "cwe_id": h.cwe_id,
+                "confidence": h.confidence,
+                "status": h.status,
+                "rationale": h.rationale,
+                "evidence_note": h.evidence_note,
+                "updated_at": h.updated_at.isoformat() if h.updated_at else None,
+            }
+            for h in rows
+        ]
+    }
+
+
+@router.post("/{engagement_id}/snapshots", status_code=201)
+async def create_snapshot(
+    engagement_id: str,
+    label: str = Query(default="manual-snapshot"),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, object]:
+    eng = await db.get(Engagement, engagement_id)
+    if not eng:
+        raise HTTPException(status_code=404, detail="Engagement not found.")
+    snap = await capture_snapshot(db, engagement_id, label=label)
+    await db.commit()
+    return {
+        "id": snap.id,
+        "label": snap.label,
+        "assets_count": snap.assets_count,
+        "endpoints_count": snap.endpoints_count,
+        "findings_count": snap.findings_count,
+    }
+
+
+@router.get("/{engagement_id}/diff")
+async def get_scan_diff(
+    engagement_id: str,
+    base: str | None = None,
+    target: str | None = None,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, object]:
+    snaps = (
+        await db.execute(
+            select(ScanSnapshot)
+            .where(ScanSnapshot.engagement_id == engagement_id)
+            .order_by(ScanSnapshot.created_at.asc())
+        )
+    ).scalars().all()
+    if len(snaps) < 2:
+        return {"has_diff": False, "snapshots_count": len(snaps)}
+    base_snap = next((s for s in snaps if s.id == base), snaps[0]) if base else snaps[0]
+    tgt_snap = next((s for s in snaps if s.id == target), snaps[-1]) if target else snaps[-1]
+    return {"has_diff": True, "snapshots_count": len(snaps), **compute_snapshot_diff(base_snap, tgt_snap)}
+
+
+@router.post("/{engagement_id}/repeater")
+async def run_repeater(
+    engagement_id: str,
+    body: RepeaterRequestInput,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, object]:
+    eng = await db.get(Engagement, engagement_id)
+    if not eng:
+        raise HTTPException(status_code=404, detail="Engagement not found.")
+    scope_row = (
+        await db.execute(select(ScopePolicyModel).where(ScopePolicyModel.engagement_id == engagement_id))
+    ).scalar_one_or_none()
+    if not scope_row:
+        raise HTTPException(status_code=400, detail="Scope policy not found.")
+    scope = ScopePolicy.from_orm(scope_row)
+
+    try:
+        norm_url = scope.validate_target(body.url)
+    except ScopeViolationError as exc:
+        raise HTTPException(status_code=403, detail=f"Scope blocked repeater target: {exc}")
+
+    merged_headers: dict[str, str] = {"User-Agent": "AegisPT-Repeater/0.1"}
+    if body.use_engagement_auth:
+        merged_headers.update(scope.custom_headers)
+    merged_headers.update(body.headers)
+    cookies = dict(scope.auth_cookies) if body.use_engagement_auth else {}
+
+    limiter = rate_limiters.get(engagement_id, scope.max_rps)
+    is_local = (urlparse(norm_url).hostname or "").lower() in {"127.0.0.1", "localhost", "::1"}
+    adapter = HttpProbeAdapter()
+    start = time.monotonic()
+
+    try:
+        async with httpx.AsyncClient(
+            verify=False,
+            follow_redirects=False,
+            timeout=float(body.timeout_seconds),
+            trust_env=not is_local,
+        ) as client:
+            resp = await adapter._safe_request(
+                client,
+                body.method,
+                norm_url,
+                scope=scope,
+                limiter=limiter,
+                headers=merged_headers,
+                content=body.body,
+                cookies=cookies,
+                follow_redirects=body.follow_redirects,
+            )
+    except ScopeViolationError as exc:
+        raise HTTPException(status_code=403, detail=f"Scope blocked redirect target: {exc}")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Repeater request failed: {exc}")
+
+    elapsed_ms = int((time.monotonic() - start) * 1000)
+    curl_parts = [f"curl -i -s -X {body.method}"]
+    for hk, hv in body.headers.items():
+        curl_parts.append(f"-H '{hk}: {hv}'")
+    if body.body:
+        curl_parts.append(f"--data '{body.body[:500]}'")
+    curl_parts.append(f"'{norm_url}'")
+
+    return {
+        "status_code": resp.status_code,
+        "final_url": str(resp.url),
+        "duration_ms": elapsed_ms,
+        "headers": dict(resp.headers),
+        "body": resp.text[:50000],
+        "curl_command": " ".join(curl_parts),
+    }

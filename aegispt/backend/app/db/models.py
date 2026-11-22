@@ -91,6 +91,12 @@ class Engagement(Base):
     events: Mapped[list["AgentEvent"]] = relationship(
         back_populates="engagement", cascade="all, delete-orphan"
     )
+    hypotheses: Mapped[list["Hypothesis"]] = relationship(
+        back_populates="engagement", cascade="all, delete-orphan"
+    )
+    snapshots: Mapped[list["ScanSnapshot"]] = relationship(
+        back_populates="engagement", cascade="all, delete-orphan"
+    )
 
 
 class ScopePolicyModel(Base):
@@ -264,3 +270,48 @@ class AgentEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
     engagement: Mapped["Engagement"] = relationship(back_populates="events")
+
+
+class Hypothesis(Base):
+    __tablename__ = "hypotheses"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    engagement_id: Mapped[str] = mapped_column(
+        String(32), ForeignKey("engagements.id", ondelete="CASCADE"), index=True
+    )
+    title: Mapped[str] = mapped_column(String(300), nullable=False)
+    target_url: Mapped[str] = mapped_column(String(2048), nullable=False)
+    parameter: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    cwe_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    confidence: Mapped[str] = mapped_column(String(16), default="medium")
+    status: Mapped[str] = mapped_column(
+        String(32), default="proposed"
+    )  # proposed|testing|awaiting_approval|confirmed|disproven
+    rationale: Mapped[str] = mapped_column(Text, default="")
+    evidence_note: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
+
+    engagement: Mapped["Engagement"] = relationship(back_populates="hypotheses")
+
+
+class ScanSnapshot(Base):
+    __tablename__ = "scan_snapshots"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    engagement_id: Mapped[str] = mapped_column(
+        String(32), ForeignKey("engagements.id", ondelete="CASCADE"), index=True
+    )
+    label: Mapped[str] = mapped_column(String(120), default="snapshot")
+    assets_count: Mapped[int] = mapped_column(Integer, default=0)
+    endpoints_count: Mapped[int] = mapped_column(Integer, default=0)
+    findings_count: Mapped[int] = mapped_column(Integer, default=0)
+    asset_keys: Mapped[list[str]] = mapped_column(JSON, default=list)
+    endpoint_keys: Mapped[list[str]] = mapped_column(JSON, default=list)
+    finding_fingerprints: Mapped[list[str]] = mapped_column(JSON, default=list)
+    open_ports: Mapped[list[str]] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    engagement: Mapped["Engagement"] = relationship(back_populates="snapshots")

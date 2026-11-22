@@ -1,7 +1,8 @@
 """SSLScan TLS protocol, cipher, and certificate security auditor (Tier 1)."""
 from __future__ import annotations
 
-import xml.etree.ElementTree as ET
+import defusedxml.ElementTree as ET
+from xml.etree.ElementTree import ParseError as XMLParseError
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -158,7 +159,7 @@ class SslscanAdapter(BaseToolAdapter):
                         discovered_by=self.name,
                     )
                 )
-            except ET.ParseError:
+            except (XMLParseError, Exception):
                 pass
 
         return ToolResult(

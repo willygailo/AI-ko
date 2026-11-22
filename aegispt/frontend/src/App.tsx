@@ -1,7 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
+  Camera,
   FileText,
+  GitCompare,
   KeyRound,
   Pause,
   Play,
@@ -14,6 +16,8 @@ import {
   Square,
   Terminal,
   Trash2,
+  Wifi,
+  WifiOff,
   X,
 } from "lucide-react";
 import {
@@ -22,6 +26,7 @@ import {
   Engagement,
   EngagementDetail,
   LLMProfileItem,
+  ScanDiffResponse,
   ToolRunItem,
   api,
   createEngagementWebSocket,
@@ -31,6 +36,7 @@ import {
 import { ApprovalModal } from "./components/ApprovalModal";
 import { AttackGraph } from "./components/AttackGraph";
 import { FindingsPanel } from "./components/FindingsPanel";
+import { RepeaterPanel } from "./components/RepeaterPanel";
 import { ScopeWizardModal } from "./components/ScopeWizardModal";
 import { SettingsModal } from "./components/SettingsModal";
 
@@ -50,6 +56,16 @@ const EVENT_COLORS: Record<string, string> = {
   engagement_failed: "text-red-400 font-bold",
 };
 
+type WorkspaceTab =
+  | "graph"
+  | "endpoints"
+  | "findings"
+  | "hypotheses"
+  | "repeater"
+  | "runs"
+  | "approvals"
+  | "diff";
+
 export default function App() {
   const [tokenInput, setTokenInput] = useState(getStoredToken());
   const [authenticated, setAuthenticated] = useState(Boolean(getStoredToken()));
@@ -60,14 +76,17 @@ export default function App() {
   const [detail, setDetail] = useState<EngagementDetail | null>(null);
   const [events, setEvents] = useState<AgentEventItem[]>([]);
   const [profiles, setProfiles] = useState<LLMProfileItem[]>([]);
+  const [wsConnected, setWsConnected] = useState(false);
 
   const [showWizard, setShowWizard] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [activeApproval, setActiveApproval] = useState<ApprovalItem | null>(null);
-  const [activeTab, setActiveTab] = useState<"graph" | "endpoints" | "findings" | "runs" | "approvals">("graph");
+  const [activeTab, setActiveTab] = useState<WorkspaceTab>("graph");
 
   const [endpointSearch, setEndpointSearch] = useState("");
   const [selectedRunLog, setSelectedRunLog] = useState<{ run: ToolRunItem; log: string } | null>(null);
+  const [repeaterUrl, setRepeaterUrl] = useState("");
+  const [scanDiff, setScanDiff] = useState<ScanDiffResponse | null>(null);
 
   const [manualTool, setManualTool] = useState("http_probe");
   const [manualTarget, setManualTarget] = useState("");
@@ -97,7 +116,10 @@ export default function App() {
     const seed =
       d.scope?.allowed_urls?.[0] ||
       (d.scope?.allowed_domains?.[0] ? `https://${d.scope.allowed_domains[0]}` : "");
-    if (seed) setManualTarget((prev) => prev || seed);
+    if (seed) {
+      setManualTarget((prev) => prev || seed);
+      setRepeaterUrl((prev) => prev || seed);
+    }
   }, []);
 
   const refreshProfiles = useCallback(async () => {
@@ -115,33 +137,61 @@ export default function App() {
     });
   }, [authenticated, refreshList, refreshProfiles]);
 
+  // WebSocket with automatic exponential backoff reconnect
   useEffect(() => {
     if (!authenticated || !selectedId) return;
     refreshDetail(selectedId).catch(() => {});
 
-    if (wsRef.current) {
-      wsRef.current.close();
-    }
-    const ws = createEngagementWebSocket(selectedId, (ev) => {
-      setEvents((prev) => [...prev.slice(-240), ev]);
-      if (
-        [
-          "tool_completed",
-          "manual_tool_completed",
-          "approval_required",
-          "approval_resolved",
-          "executive_summary",
-          "engagement_finished",
-          "engagement_failed",
-          "scope_blocked",
-        ].includes(ev.event_type)
-      ) {
-        refreshDetail(selectedId).catch(() => {});
-      }
-    });
-    wsRef.current = ws;
-    return () => ws.close();
+    let closedByEffect = false;
+    let retryDelay = 1000;
+    let retryTimer: number | undefined;
+
+    const connect = () => {
+      if (closedByEffect) return;
+      const ws = createEngagementWebSocket(selectedId, (ev) => {
+        setEvents((prev) => [...prev.slice(-240), ev]);
+        if (
+          [
+            "tool_completed",
+            "manual_tool_completed",
+            "approval_required",
+            "approval_resolved",
+            "executive_summary",
+            "engagement_finished",
+            "engagement_failed",
+            "scope_blocked",
+          ].includes(ev.event_type)
+        ) {
+          refreshDetail(selectedId).catch(() => {});
+        }
+      });
+      ws.onopen = () => {
+        setWsConnected(true);
+        retryDelay = 1000;
+      };
+      ws.onclose = () => {
+        setWsConnected(false);
+        if (!closedByEffect) {
+          retryTimer = window.setTimeout(connect, retryDelay);
+          retryDelay = Math.min(retryDelay * 2, 12000);
+        }
+      };
+      wsRef.current = ws;
+    };
+
+    connect();
+    return () => {
+      closedByEffect = true;
+      if (retryTimer) window.clearTimeout(retryTimer);
+      wsRef.current?.close();
+    };
   }, [authenticated, selectedId, refreshDetail]);
+
+  useEffect(() => {
+    if (activeTab === "diff" && selectedId) {
+      api.getScanDiff(selectedId).then(setScanDiff).catch(() => {});
+    }
+  }, [activeTab, selectedId, detail?.snapshots?.length]);
 
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -152,7 +202,6 @@ export default function App() {
     [detail]
   );
 
-  // Auto-surface first pending approval if user has none open
   useEffect(() => {
     if (!activeApproval && pendingApprovals.length > 0) {
       setActiveApproval(pendingApprovals[0]);
@@ -292,6 +341,7 @@ export default function App() {
             onChange={(e) => {
               setSelectedId(e.target.value);
               setManualTarget("");
+              setRepeaterUrl("");
             }}
             className="bg-slate-950 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-white min-w-[220px]"
           >
@@ -306,6 +356,19 @@ export default function App() {
           {detail && (
             <span className="text-[11px] px-2 py-0.5 rounded-full bg-slate-800 border border-slate-700 text-cyan-300 uppercase font-semibold">
               {detail.status} • {detail.autonomy_mode}
+            </span>
+          )}
+
+          {selectedId && (
+            <span
+              className={`flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full border ${
+                wsConnected
+                  ? "bg-emerald-500/10 border-emerald-500/40 text-emerald-300"
+                  : "bg-amber-500/10 border-amber-500/40 text-amber-300"
+              }`}
+            >
+              {wsConnected ? <Wifi className="w-3 h-3" /> : <WifiOff className="w-3 h-3" />}
+              {wsConnected ? "Live" : "Reconnecting"}
             </span>
           )}
         </div>
@@ -390,20 +453,23 @@ export default function App() {
         </div>
       ) : (
         <div className="flex-1 grid grid-cols-1 lg:grid-cols-12 gap-3 p-3 min-h-0">
-          {/* Left 7 Columns: Graph / Endpoints / Findings / Runs / Approvals */}
+          {/* Left 7 Columns */}
           <div className="lg:col-span-7 flex flex-col gap-2 min-h-0">
-            <div className="flex flex-wrap items-center gap-2">
+            <div className="flex flex-wrap items-center gap-1.5">
               {[
                 { id: "graph", label: "Attack Graph" },
                 { id: "endpoints", label: `Endpoints (${detail.endpoints.length})` },
                 { id: "findings", label: `Findings (${detail.findings.length})` },
-                { id: "runs", label: `Tool Runs (${detail.tool_runs.length})` },
+                { id: "hypotheses", label: `Hypotheses (${detail.hypotheses?.length || 0})` },
+                { id: "repeater", label: "Repeater" },
+                { id: "runs", label: `Runs (${detail.tool_runs.length})` },
                 { id: "approvals", label: `Approvals (${detail.approvals.length})` },
+                { id: "diff", label: `Diff (${detail.snapshots?.length || 0})` },
               ].map((tab) => (
                 <button
                   key={tab.id}
-                  onClick={() => setActiveTab(tab.id as typeof activeTab)}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold ${
+                  onClick={() => setActiveTab(tab.id as WorkspaceTab)}
+                  className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold ${
                     activeTab === tab.id
                       ? "bg-cyan-600 text-white"
                       : "bg-slate-900 border border-slate-800 text-slate-400 hover:text-white"
@@ -449,26 +515,35 @@ export default function App() {
                           <th className="p-2.5">URL</th>
                           <th className="p-2.5">Params</th>
                           <th className="p-2.5">Source</th>
-                          <th className="p-2.5">Action</th>
+                          <th className="p-2.5">Actions</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-800/70">
                         {filteredEndpoints.map((ep) => (
                           <tr key={ep.id} className="hover:bg-slate-800/40">
                             <td className="p-2.5 font-mono font-semibold text-indigo-300">{ep.method}</td>
-                            <td className="p-2.5 font-mono text-slate-200 truncate max-w-[260px]" title={ep.url}>
+                            <td className="p-2.5 font-mono text-slate-200 truncate max-w-[230px]" title={ep.url}>
                               {ep.url}
                             </td>
                             <td className="p-2.5 text-[11px] text-cyan-300 font-mono">
                               {[...ep.query_params, ...ep.body_params].join(", ") || "-"}
                             </td>
                             <td className="p-2.5 text-slate-400">{ep.source}</td>
-                            <td className="p-2.5">
+                            <td className="p-2.5 flex items-center gap-2">
                               <button
                                 onClick={() => setManualTarget(ep.url)}
                                 className="flex items-center gap-1 text-[11px] text-emerald-400 hover:text-emerald-300 font-semibold"
                               >
-                                <Send className="w-3 h-3" /> Pivot
+                                <Send className="w-3 h-3" /> Tool
+                              </button>
+                              <button
+                                onClick={() => {
+                                  setRepeaterUrl(ep.url);
+                                  setActiveTab("repeater");
+                                }}
+                                className="text-[11px] text-cyan-400 hover:text-cyan-300 font-semibold"
+                              >
+                                Repeat
                               </button>
                             </td>
                           </tr>
@@ -484,6 +559,53 @@ export default function App() {
                   engagementId={detail.id}
                   findings={detail.findings}
                   onRefresh={() => refreshDetail(detail.id)}
+                />
+              )}
+
+              {activeTab === "hypotheses" && (
+                <div className="h-full bg-slate-900/60 border border-slate-800 rounded-xl overflow-auto divide-y divide-slate-800/70">
+                  {(!detail.hypotheses || detail.hypotheses.length === 0) && (
+                    <div className="p-6 text-center text-xs text-slate-500">
+                      AI-generated hypotheses will appear here as the planner analyzes discovered endpoints.
+                    </div>
+                  )}
+                  {(detail.hypotheses || []).map((h) => (
+                    <div key={h.id} className="p-3.5 text-xs flex items-start justify-between gap-3">
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-2">
+                          <span className="font-bold text-slate-100">{h.title}</span>
+                          <span className="text-[10px] px-2 py-0.5 rounded bg-slate-800 text-cyan-300 uppercase">
+                            {h.status} • {h.confidence}
+                          </span>
+                        </div>
+                        <div className="font-mono text-[11px] text-slate-400">{h.target_url}</div>
+                        <div className="text-slate-300">{h.rationale}</div>
+                        {h.evidence_note && <div className="text-[11px] text-emerald-300">{h.evidence_note}</div>}
+                      </div>
+                      <select
+                        value={h.status}
+                        onChange={(e) =>
+                          api
+                            .updateHypothesis(h.id, { status: e.target.value })
+                            .then(() => refreshDetail(detail.id))
+                        }
+                        className="bg-slate-950 border border-slate-800 rounded px-2 py-1 text-[11px] text-white"
+                      >
+                        <option value="proposed">proposed</option>
+                        <option value="testing">testing</option>
+                        <option value="confirmed">confirmed</option>
+                        <option value="disproven">disproven</option>
+                      </select>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {activeTab === "repeater" && (
+                <RepeaterPanel
+                  engagementId={detail.id}
+                  initialUrl={repeaterUrl}
+                  onFindingCreated={() => refreshDetail(detail.id)}
                 />
               )}
 
@@ -557,6 +679,74 @@ export default function App() {
                   ))}
                 </div>
               )}
+
+              {activeTab === "diff" && (
+                <div className="h-full flex flex-col bg-slate-900/60 border border-slate-800 rounded-xl overflow-hidden text-xs">
+                  <div className="flex items-center justify-between px-4 py-2.5 border-b border-slate-800 bg-slate-900">
+                    <span className="font-semibold uppercase tracking-wider text-slate-300 flex items-center gap-2">
+                      <GitCompare className="w-4 h-4 text-cyan-400" /> Scan Snapshot Delta
+                    </span>
+                    <button
+                      onClick={() =>
+                        api
+                          .createSnapshot(detail.id, `manual-${(detail.snapshots?.length || 0) + 1}`)
+                          .then(() => refreshDetail(detail.id))
+                      }
+                      className="flex items-center gap-1 px-2.5 py-1 rounded bg-cyan-600 hover:bg-cyan-500 text-white font-semibold"
+                    >
+                      <Camera className="w-3.5 h-3.5" /> Capture Snapshot
+                    </button>
+                  </div>
+                  <div className="flex-1 overflow-auto p-4 space-y-3">
+                    {!scanDiff?.has_diff ? (
+                      <div className="text-slate-500 text-center mt-8">
+                        Need at least 2 scan snapshots to compute deltas (currently {scanDiff?.snapshots_count || 0}).
+                      </div>
+                    ) : (
+                      <>
+                        <div className="text-slate-300">
+                          Comparing <strong>{scanDiff.baseline?.label}</strong> →{" "}
+                          <strong>{scanDiff.current?.label}</strong>
+                        </div>
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                          <div className="bg-slate-950 border border-slate-800 rounded-lg p-3">
+                            <div className="text-lg font-bold text-cyan-300">+{scanDiff.new_assets?.length || 0}</div>
+                            <div className="text-[11px] text-slate-400">New Assets</div>
+                          </div>
+                          <div className="bg-slate-950 border border-slate-800 rounded-lg p-3">
+                            <div className="text-lg font-bold text-indigo-300">+{scanDiff.new_endpoints?.length || 0}</div>
+                            <div className="text-[11px] text-slate-400">New Endpoints</div>
+                          </div>
+                          <div className="bg-slate-950 border border-slate-800 rounded-lg p-3">
+                            <div className="text-lg font-bold text-amber-300">+{scanDiff.new_findings?.length || 0}</div>
+                            <div className="text-[11px] text-slate-400">New Findings</div>
+                          </div>
+                          <div className="bg-slate-950 border border-slate-800 rounded-lg p-3">
+                            <div className="text-lg font-bold text-emerald-300">-{scanDiff.resolved_findings?.length || 0}</div>
+                            <div className="text-[11px] text-slate-400">Resolved</div>
+                          </div>
+                        </div>
+                        {(scanDiff.new_findings?.length || 0) > 0 && (
+                          <div>
+                            <div className="text-slate-400 font-semibold mb-1">New Findings</div>
+                            <pre className="bg-slate-950 border border-slate-800 rounded p-2.5 text-amber-200 font-mono text-[11px] overflow-x-auto">
+                              {scanDiff.new_findings?.join("\n")}
+                            </pre>
+                          </div>
+                        )}
+                        {(scanDiff.new_endpoints?.length || 0) > 0 && (
+                          <div>
+                            <div className="text-slate-400 font-semibold mb-1">New Endpoints</div>
+                            <pre className="bg-slate-950 border border-slate-800 rounded p-2.5 text-cyan-200 font-mono text-[11px] overflow-x-auto max-h-40">
+                              {scanDiff.new_endpoints?.slice(0, 50).join("\n")}
+                            </pre>
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
           </div>
 
@@ -602,16 +792,21 @@ export default function App() {
                   onChange={(e) => setManualTool(e.target.value)}
                   className="bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1.5 text-white font-mono"
                 >
-                  <option value="http_probe">http_probe (T1)</option>
+                  <option value="http_probe">http_probe (T1/3)</option>
+                  <option value="js_miner">js_miner (T1)</option>
                   <option value="subfinder">subfinder (T1)</option>
+                  <option value="dnsx">dnsx (T1)</option>
                   <option value="httpx">httpx (T1)</option>
                   <option value="whatweb">whatweb (T1)</option>
                   <option value="wafw00f">wafw00f (T1)</option>
                   <option value="sslscan">sslscan (T1)</option>
                   <option value="katana">katana (T1)</option>
+                  <option value="naabu">naabu (T2)</option>
                   <option value="nmap">nmap (T2)</option>
                   <option value="ffuf">ffuf (T2)</option>
+                  <option value="feroxbuster">feroxbuster (T2)</option>
                   <option value="arjun">arjun (T2)</option>
+                  <option value="nikto">nikto (T2)</option>
                   <option value="nuclei">nuclei (T2)</option>
                   <option value="zaproxy">zaproxy (T2/3)</option>
                   <option value="dalfox">dalfox (T3)</option>
@@ -634,7 +829,7 @@ export default function App() {
               <input
                 value={manualArgsJson}
                 onChange={(e) => setManualArgsJson(e.target.value)}
-                placeholder='Optional args JSON e.g. {"mode":"api_discovery"}'
+                placeholder='Optional args JSON e.g. {"mode":"differential_bola"}'
                 className="w-full bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1 font-mono text-[11px] text-slate-300"
               />
               {manualError && <div className="text-red-400 text-[11px]">{manualError}</div>}
