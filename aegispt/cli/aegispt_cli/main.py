@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -468,6 +469,223 @@ def checklist(engagement_id: str = typer.Argument("latest", help="Engagement ID 
     for it in items:
         table.add_row(it["skill_title"], it["status"].upper(), it["item_text"])
     console.print(table)
+
+
+TOOL_ARG_EXAMPLES: dict[str, str] = {
+    "http_probe": '{"mode":"passive_audit"} | {"mode":"graphql_deep_audit"} | {"mode":"differential_bola"}',
+    "js_miner": '{"max_bundles": 10}',
+    "spa_inspector": '{"wait_ms": 2500}',
+    "trufflehog": '{"max_bundles": 8, "verify_secrets": false}',
+    "gitleaks": '{"max_bundles": 8}',
+    "katana": '{"depth": 2, "js_crawl": true}',
+    "ffuf": '{"wordlist_profile": "builtin", "max_time_seconds": 30}',
+    "feroxbuster": '{"max_time_seconds": 30}',
+    "arjun": '{"method": "GET"}',
+    "nmap": '{"top_ports": 100}',
+    "nuclei": '{"tags": ["misconfig","exposure"], "include_intrusive": false}',
+    "zaproxy": '{"mode": "spider_passive", "max_duration_seconds": 60}',
+    "dalfox": '{"param": "q"}',
+    "sqlmap": '{"method": "POST", "data": "{\\"id\\":\\"1\\"}", "param": "id", "level": 1, "risk": 1}',
+    "wpscan": '{"detection_mode": "passive", "enumerate": "vp,vt,u"}',
+}
+
+HTTP_PROBE_MODES: list[tuple[str, str, str]] = [
+    ("passive_audit", "T1", "Headers, cookie attributes, multi-origin CORS, passive JWT, OpenAPI"),
+    ("api_discovery", "T1", "Probe /openapi.json, /swagger.json, /graphql, /robots.txt"),
+    ("graphql_deep_audit", "T2", "Schema dump + endpoint import, field-suggestion oracle, array batching"),
+    ("oauth_audit", "T2", "OIDC .well-known metadata, implicit/PKCE checks, strict redirect_uri test"),
+    ("replay_request", "T3", "Scoped custom method/headers/body HTTP replay"),
+    ("differential_bola", "T3", "Primary vs Secondary-role (User B) or Unauth IDOR/BOLA diff"),
+    ("jwt_active_probe", "T3", "Verify alg:none / stripped signature rejection & weak placeholder HMAC"),
+    ("bfla_verb_tamper", "T3", "Verb authorization matrix check across GET/POST/PUT/PATCH/DELETE/OPTIONS"),
+    ("race_burst_probe", "T3", "Synchronized concurrent burst (2-15 requests) for TOCTOU/idempotency"),
+    ("hpp_and_content_switch", "T3", "Duplicate param precedence (HPP) & JSON/form Content-Type strictness"),
+    ("ssti_probe", "T3", "Benign 37*50 arithmetic check with template engine family fingerprinting"),
+    ("open_redirect_probe", "T3", "Synthetic .invalid redirect_uri/next/url Location check"),
+]
+
+
+def _default_aegispt_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def _write_env_config(
+    env_path: Path, updates: dict[str, str], template_path: Path | None = None
+) -> Path:
+    """Safely update or create a 0o600 .env configuration file preserving comments."""
+    cleaned: dict[str, str] = {}
+    for k, v in updates.items():
+        clean_k = "".join(ch for ch in str(k) if ch.isalnum() or ch == "_")
+        clean_v = str(v).replace("\r", "").replace("\n", "").strip()
+        if clean_k:
+            cleaned[clean_k] = clean_v
+
+    if env_path.is_file():
+        lines = env_path.read_text(encoding="utf-8").splitlines()
+    elif template_path and template_path.is_file():
+        lines = template_path.read_text(encoding="utf-8").splitlines()
+    else:
+        lines = []
+
+    seen: set[str] = set()
+    out_lines: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in line:
+            out_lines.append(line)
+            continue
+        key = line.split("=", 1)[0].strip()
+        if key in cleaned:
+            out_lines.append(f"{key}={cleaned[key]}")
+            seen.add(key)
+        else:
+            out_lines.append(line)
+
+    for k, v in cleaned.items():
+        if k not in seen:
+            out_lines.append(f"{k}={v}")
+
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    env_path.write_text("\n".join(out_lines) + "\n", encoding="utf-8")
+    try:
+        os.chmod(env_path, 0o600)
+    except OSError:
+        pass
+    return env_path
+
+
+@app.command()
+def setup(
+    provider: Optional[str] = typer.Option(
+        None, "--provider", "-p", help="cloud | local | offline"
+    ),
+    url: Optional[str] = typer.Option(None, "--url", help="Ollama base URL override"),
+    api_key: Optional[str] = typer.Option(None, "--api-key", help="Ollama Cloud / endpoint API key"),
+    fast_model: Optional[str] = typer.Option(None, "--fast-model", help="Fast model name"),
+    reasoning_model: Optional[str] = typer.Option(None, "--reasoning-model", help="Reasoning model name"),
+    env_path: Optional[Path] = typer.Option(None, "--env-path", help="Custom .env destination path"),
+    verify: bool = typer.Option(True, "--verify/--no-verify", help="Verify live model endpoint reachability"),
+) -> None:
+    """Interactive setup wizard for .env (Ollama Cloud, Lightweight Local Ollama, or Offline Fallback)."""
+    root = _default_aegispt_root()
+    target_env = env_path or (root / ".env")
+    template_env = root / ".env.example"
+
+    chosen = (provider or "").strip().lower()
+    if chosen not in {"cloud", "local", "offline"}:
+        console.print(
+            Panel(
+                "[bold]1) cloud[/bold]   — Ollama Cloud (https://ollama.com + API key, 0 MB local RAM)\n"
+                "[bold]2) local[/bold]   — Lightweight Local Ollama (qwen2.5:1.5b + 3b for 7.5-8 GB RAM)\n"
+                "[bold]3) offline[/bold] — Zero-LLM Deterministic OWASP + Skill Pack Planner",
+                title="AegisPT AI Setup Modes",
+                border_style="cyan",
+            )
+        )
+        chosen = Prompt.ask("Choose mode", choices=["cloud", "local", "offline"], default="cloud")
+
+    if chosen == "cloud":
+        resolved_url = url or "https://ollama.com"
+        resolved_key = api_key if api_key is not None else Prompt.ask("Ollama Cloud API Key", password=True)
+        resolved_fast = fast_model or "qwen3-next:80b"
+        resolved_reason = reasoning_model or "qwen3-coder:480b"
+    elif chosen == "local":
+        resolved_url = url or "http://127.0.0.1:11434"
+        resolved_key = api_key or ""
+        resolved_fast = fast_model or "qwen2.5:1.5b"
+        resolved_reason = reasoning_model or "qwen2.5:3b"
+    else:
+        resolved_url = url or "http://127.0.0.1:11434"
+        resolved_key = ""
+        resolved_fast = fast_model or "qwen2.5:1.5b"
+        resolved_reason = reasoning_model or "qwen2.5:3b"
+
+    written = _write_env_config(
+        target_env,
+        {
+            "AEGISPT_OLLAMA_URL": resolved_url,
+            "AEGISPT_OLLAMA_API_KEY": resolved_key,
+            "AEGISPT_OLLAMA_FAST_MODEL": resolved_fast,
+            "AEGISPT_OLLAMA_REASONING_MODEL": resolved_reason,
+        },
+        template_path=template_env,
+    )
+
+    console.print(
+        Panel(
+            f"Saved config: [cyan]{written}[/cyan] (chmod 600)\n"
+            f"Mode: [bold]{chosen}[/bold]\n"
+            f"Endpoint: {resolved_url}\n"
+            f"Fast Model: {resolved_fast} | Reasoning Model: {resolved_reason}\n"
+            f"API Key: {'configured (masked)' if resolved_key else '(none)'}",
+            title="Setup Complete",
+            border_style="green",
+        )
+    )
+
+    if chosen == "local":
+        console.print("[dim]Tip: Pull compact local models anytime via: ./scripts/setup_ollama.sh --light[/dim]")
+    if verify and chosen != "offline":
+        from app.llm.router import LLMProfileConfig, llm_router
+
+        probe_cfg = LLMProfileConfig(
+            name=chosen,
+            provider="ollama",
+            base_url=resolved_url,
+            api_key=resolved_key,
+            fast_model=resolved_fast,
+            reasoning_model=resolved_reason,
+        )
+        res = asyncio.run(llm_router.list_models(probe_cfg))
+        if res.get("reachable"):
+            console.print(f"[green]Endpoint reachable![/green] Found {len(res.get('models') or [])} model(s).")
+        else:
+            console.print(f"[yellow]Endpoint not reachable yet:[/yellow] {res.get('error')} (fallback planner still works).")
+
+
+@app.command()
+def tools(
+    tier: Optional[int] = typer.Option(None, "--tier", "-t", help="Filter by tier (1, 2, or 3)"),
+    json_output: bool = typer.Option(False, "--json", help="Print JSON catalog"),
+) -> None:
+    """List all 24 tool adapters, 12 http_probe modes, and example JSON arguments."""
+    from app.tools.registry import tool_registry
+
+    catalog = tool_registry.describe_catalog()
+    if tier is not None:
+        catalog = [c for c in catalog if c["tier"] == tier]
+
+    if json_output:
+        console.print_json(json.dumps({"tools": catalog, "http_probe_modes": HTTP_PROBE_MODES}))
+        return
+
+    table = Table(title=f"AegisPT Security Tool Adapters ({len(catalog)})")
+    table.add_column("Tool", style="cyan")
+    table.add_column("Tier", justify="center")
+    table.add_column("Status")
+    table.add_column("Example args JSON")
+    table.add_column("Purpose")
+
+    for c in catalog:
+        st = "[green]READY[/green]" if c["available"] else "[red]MISSING[/red]"
+        table.add_row(
+            c["name"],
+            f"T{c['tier']}",
+            st,
+            TOOL_ARG_EXAMPLES.get(c["name"], "{}"),
+            c["description"][:85],
+        )
+    console.print(table)
+
+    if tier is None or any(m_tier == f"T{tier}" for _, m_tier, _ in HTTP_PROBE_MODES):
+        modes_tbl = Table(title="Native `http_probe` Deep Verification Modes (12)")
+        modes_tbl.add_column("Mode (--args '{\"mode\":...}')", style="magenta")
+        modes_tbl.add_column("Tier", justify="center")
+        modes_tbl.add_column("Capability")
+        for m_name, m_tier, m_desc in HTTP_PROBE_MODES:
+            if tier is None or m_tier == f"T{tier}":
+                modes_tbl.add_row(m_name, m_tier, m_desc)
+        console.print(modes_tbl)
 
 
 def main() -> None:

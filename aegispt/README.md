@@ -1,6 +1,6 @@
 # AegisPT — Private AI Web & API Penetration Testing Platform
 
-See the root [README.md](../README.md) for the complete architecture diagram, 3-tier tool matrix, configuration reference, and API overview.
+See the root [README.md](../README.md) for the complete architecture diagram, 3-tier tool matrix, configuration reference, and API overview, or read [TOOLS_AND_SETUP.md](./TOOLS_AND_SETUP.md) for the Ollama Cloud / local / offline setup guide and 24-tool cheat sheet.
 
 ---
 
@@ -10,17 +10,19 @@ See the root [README.md](../README.md) for the complete architecture diagram, 3-
 
 ```bash
 cp .env.example .env
+./aegispt setup           # Guided .env wizard (Ollama Cloud, Light Local, or Offline Fallback)
 ./aegispt doctor
+./aegispt tools           # Interactive cheat sheet for all 24 tools & 12 http_probe modes
 
 # Optional: install globally so `aegispt` and `python -m aegispt_cli.main` work anywhere
 pip install --user --break-system-packages --no-build-isolation --no-deps -e .
 aegispt --install-completion
 ```
 
-Optional local Ollama setup (tuned for 7.5–8 GB RAM hosts):
+Optional local Ollama setup (lightweight `--light` profile pulls `qwen2.5:1.5b` + `qwen2.5:3b` for 7.5–8 GB RAM hosts; pass `--coder` for 7B):
 
 ```bash
-./scripts/setup_ollama.sh
+./scripts/setup_ollama.sh --light
 ```
 
 ### 2. Start Backend Server & Built-In Web Dashboard
