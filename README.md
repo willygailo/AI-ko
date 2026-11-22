@@ -309,11 +309,19 @@ Covers scope allowlists & DNS boundary checks, 3-tier approval workflows, tool o
 
 Contributions are welcome! Please read [CONTRIBUTING.md](./CONTRIBUTING.md), [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md), and [SECURITY.md](./SECURITY.md) before opening a pull request.
 
-<a href="https://github.com/willygailo/AI-ko/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=willygailo/AI-ko" alt="Contributors" />
-</a>
+<table>
+  <tr>
+    <td align="center">
+      <a href="https://github.com/willygailo">
+        <img src="https://github.com/willygailo.png?size=80" width="72" height="72" alt="@willygailo" /><br />
+        <sub><b>@willygailo</b></sub>
+      </a><br />
+      <sub>Creator &amp; Lead Maintainer</sub>
+    </td>
+  </tr>
+</table>
 
-- **Maintainer**: [@willygailo](https://github.com/willygailo)
+View full commit history on [GitHub Contributors](https://github.com/willygailo/AI-ko/graphs/contributors).
 
 ---
 
