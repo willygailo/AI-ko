@@ -1,0 +1,47 @@
+# === Secrets & Local Runtime Data ===
+.env
+.env.*
+!.env.example
+aegispt/data/
+*.pem
+*.key
+*.db
+*.sqlite
+*.sqlite3
+
+# === Python & Testing ===
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# === Frontend (Node / pnpm / Vite / TypeScript) ===
+node_modules/
+aegispt/frontend/dist/
+*.tsbuildinfo
+.pnpm-store/
+npm-debug.log*
+pnpm-debug.log*
+
+# === Generated Pentest Logs & Exported Reports ===
+*.log
+aegispt-report-*
+*.sarif.json
+
+# === OS & Editor Artifacts ===
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.vscode/
+.idea/

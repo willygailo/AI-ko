@@ -1,1 +1,0 @@
-{"root":["./src/App.tsx","./src/main.tsx","./src/api/client.ts","./src/components/ApprovalModal.tsx","./src/components/AttackGraph.tsx","./src/components/FindingsPanel.tsx","./src/components/ScopeWizardModal.tsx","./src/components/SettingsModal.tsx"],"version":"5.9.3"}
