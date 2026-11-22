@@ -1,0 +1,82 @@
+[
+  {
+    "id": "wstg-api-inventory",
+    "title": "API & Endpoint Inventory Discovery",
+    "wstg_id": "WSTG-INFO-05 / API9:2023",
+    "owasp_category": "API9:2023 - Improper Inventory Management",
+    "tags": "api openapi swagger graphql rest express node json endpoints discovery",
+    "summary": "Enumerate undocumented API routes, versioned endpoints (/api/v1, /rest), OpenAPI/Swagger specs, and GraphQL introspection endpoints.",
+    "recommended_tools": ["http_probe", "katana", "ffuf"],
+    "checklist": [
+      "Probe /openapi.json, /swagger.json, /v3/api-docs, /api-docs, /graphql, and /robots.txt.",
+      "Crawl JS bundles with katana (-jc) to extract frontend-referenced REST/GraphQL routes.",
+      "Run rate-limited ffuf using the API wordlist against base API paths."
+    ]
+  },
+  {
+    "id": "wstg-misconfig-headers-cors",
+    "title": "Security Headers, TLS, & CORS Misconfiguration Audit",
+    "wstg_id": "WSTG-CONF-07 / WSTG-CLNT-07",
+    "owasp_category": "A05:2021 - Security Misconfiguration",
+    "tags": "headers cors csp hsts cookies misconfiguration nginx apache express",
+    "summary": "Inspect HTTP response headers, cookie security attributes (HttpOnly, Secure, SameSite), and cross-origin resource sharing (Access-Control-Allow-Origin).",
+    "recommended_tools": ["http_probe", "nuclei"],
+    "checklist": [
+      "Verify presence of HSTS, Content-Security-Policy, X-Frame-Options, and X-Content-Type-Options.",
+      "Send benign synthetic Origin header to detect arbitrary Origin reflection paired with Allow-Credentials: true.",
+      "Run safe nuclei templates tagged misconfig,exposure,headers."
+    ]
+  },
+  {
+    "id": "wstg-sqli-verification",
+    "title": "SQL Injection Detection & Bounded Verification",
+    "wstg_id": "WSTG-INPV-05",
+    "owasp_category": "A03:2021 - Injection",
+    "tags": "sqli sql injection database query search id param sqlite mysql postgres",
+    "summary": "Identify query/JSON parameters backed by database queries (search, filter, id, login) and verify safely with approval-gated bounded sqlmap.",
+    "recommended_tools": ["arjun", "sqlmap"],
+    "checklist": [
+      "Discover hidden GET/POST/JSON parameters on dynamic endpoints with arjun.",
+      "Propose Tier-3 approval-gated sqlmap (--level=1 --risk=1) only on specific parameterized targets."
+    ]
+  },
+  {
+    "id": "wstg-xss-verification",
+    "title": "Cross-Site Scripting (XSS) Surface & Verification",
+    "wstg_id": "WSTG-INPV-01 / WSTG-INPV-02",
+    "owasp_category": "A03:2021 - Injection",
+    "tags": "xss reflected dom stored html script search q query input angular react",
+    "summary": "Test reflected and query-driven parameters for unsafe HTML/JS rendering using approval-gated dalfox.",
+    "recommended_tools": ["katana", "arjun", "dalfox"],
+    "checklist": [
+      "Collect endpoints with query parameters from katana and arjun.",
+      "Verify reflected input handling using Tier-3 approval-gated dalfox."
+    ]
+  },
+  {
+    "id": "wstg-bola-idor",
+    "title": "Broken Object Level Authorization (BOLA / IDOR) & Auth Checks",
+    "wstg_id": "WSTG-ATHZ-04 / API1:2023",
+    "owasp_category": "API1:2023 - Broken Object Level Authorization",
+    "tags": "idor bola authorization jwt token auth bearer user account order profile api",
+    "summary": "Inspect API endpoints referencing object IDs (/users/{id}, /orders/{id}, /basket) and verify authorization enforcement via approval-gated HTTP replay.",
+    "recommended_tools": ["http_probe", "katana"],
+    "checklist": [
+      "Identify REST paths containing numeric IDs, UUIDs, or user-scoped resources.",
+      "Verify unauthenticated vs authenticated access boundaries using Tier-3 http_probe replay_request."
+    ]
+  },
+  {
+    "id": "wstg-tech-cves",
+    "title": "Framework Fingerprinting & Safe Template Exposure Scan",
+    "wstg_id": "WSTG-INFO-08 / A06:2021",
+    "owasp_category": "A06:2021 - Vulnerable and Outdated Components",
+    "tags": "fingerprint tech express php django rails wordpress spring actuator exposed",
+    "summary": "Correlate WhatWeb/HTTP headers with targeted non-intrusive Nuclei templates (exposures, panels, CVEs).",
+    "recommended_tools": ["whatweb", "wafw00f", "nuclei"],
+    "checklist": [
+      "Fingerprint backend server, frontend framework, and WAF presence.",
+      "Run Tier-2 safe nuclei scan excluding dos, intrusive, and fuzz tags."
+    ]
+  }
+]

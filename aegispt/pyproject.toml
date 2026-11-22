@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aegispt"
+version = "0.1.0"
+description = "Private, provider-agnostic AI Web & API Penetration Testing Platform with tiered human-in-the-loop autonomy."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "sqlalchemy>=2.0.30",
+    "aiosqlite>=0.20.0",
+    "pydantic>=2.8.0",
+    "pydantic-settings>=2.4.0",
+    "httpx>=0.27.0",
+    "websockets>=12.0",
+    "jinja2>=3.1.4",
+    "pyyaml>=6.0.1",
+    "typer>=0.12.0",
+    "rich>=13.7.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[project.scripts]
+aegispt = "aegispt_cli.main:app"
+aegispt-server = "app.main:run_server"
+
+[tool.setuptools.packages.find]
+where = ["backend", "cli"]
+
+[tool.pytest.ini_options]
+pythonpath = ["backend", "cli"]
+testpaths = ["backend/tests"]
