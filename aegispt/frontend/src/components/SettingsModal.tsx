@@ -94,7 +94,37 @@ export const SettingsModal: React.FC<Props> = ({ profiles, onRefreshProfiles, on
             </div>
 
             <form onSubmit={handleAddProfile} className="bg-slate-950/60 border border-slate-800 rounded-xl p-3 space-y-2.5">
-              <div className="font-semibold text-slate-300">Add Provider Endpoint</div>
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-semibold text-slate-300">Add Provider Endpoint</span>
+                <div className="flex gap-1">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setName("Local Ollama");
+                      setProvider("ollama");
+                      setBaseUrl("http://127.0.0.1:11434");
+                      setFastModel("qwen2.5:3b");
+                      setReasoningModel("qwen2.5-coder:7b");
+                    }}
+                    className="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px] text-slate-300"
+                  >
+                    Local
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setName("Ollama Cloud");
+                      setProvider("ollama");
+                      setBaseUrl("https://ollama.com");
+                      setFastModel("qwen3-next:80b");
+                      setReasoningModel("qwen3-coder:480b");
+                    }}
+                    className="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px] text-cyan-300"
+                  >
+                    Ollama Cloud
+                  </button>
+                </div>
+              </div>
               <input
                 value={name}
                 onChange={(e) => setName(e.target.value)}
@@ -107,7 +137,7 @@ export const SettingsModal: React.FC<Props> = ({ profiles, onRefreshProfiles, on
                   onChange={(e) => setProvider(e.target.value as typeof provider)}
                   className="bg-slate-950 border border-slate-800 rounded px-2.5 py-1.5 text-white"
                 >
-                  <option value="ollama">Local Ollama</option>
+                  <option value="ollama">Ollama (Local / Cloud)</option>
                   <option value="openai_compat">OpenAI-Compat / vLLM</option>
                 </select>
                 <button

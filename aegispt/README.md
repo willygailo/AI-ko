@@ -51,10 +51,14 @@ docker compose -f lab/docker-compose.lab.yml up -d
   --allow-private-ips \
   --mode tiered
 
-./aegispt run <ENGAGEMENT_ID>
-./aegispt runs <ENGAGEMENT_ID>
-./aegispt findings <ENGAGEMENT_ID>
-./aegispt report <ENGAGEMENT_ID> --format html --out report.html
+./aegispt run
+./aegispt steer "Focus on GraphQL, JWT, and BOLA checks"
+./aegispt runs
+./aegispt checklist
+./aegispt chains
+./aegispt findings
+./aegispt report --format html --out report.html
+./aegispt report --format poc_sh --out verify_findings.sh
 ```
 
 ---

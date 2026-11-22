@@ -16,6 +16,8 @@ export const ScopeWizardModal: React.FC<Props> = ({ profiles, onCreated, onClose
   const [excludedPathsText, setExcludedPathsText] = useState("/logout\n/billing");
   const [headersText, setHeadersText] = useState("");
   const [cookiesText, setCookiesText] = useState("");
+  const [secHeadersText, setSecHeadersText] = useState("");
+  const [secCookiesText, setSecCookiesText] = useState("");
   const [showAuthVault, setShowAuthVault] = useState(false);
   const [mode, setMode] = useState<"tiered" | "copilot" | "lab_autopilot">("tiered");
   const [tier2Auto, setTier2Auto] = useState(true);
@@ -62,6 +64,8 @@ export const ScopeWizardModal: React.FC<Props> = ({ profiles, onCreated, onClose
           excluded_paths: splitLines(excludedPathsText),
           custom_headers: parseKVLines(headersText, ":"),
           auth_cookies: parseKVLines(cookiesText, "="),
+          secondary_headers: parseKVLines(secHeadersText, ":"),
+          secondary_cookies: parseKVLines(secCookiesText, "="),
           max_rps: maxRps,
           allow_private_ips: allowPrivateIps,
         },
@@ -226,6 +230,26 @@ export const ScopeWizardModal: React.FC<Props> = ({ profiles, onCreated, onClose
                     value={cookiesText}
                     onChange={(e) => setCookiesText(e.target.value)}
                     placeholder="session_id=abc123"
+                    className="w-full bg-slate-950 border border-slate-800 rounded p-2 font-mono text-[11px] text-slate-200"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-400 mb-1">Secondary User/Role Headers (BOLA/IDOR)</label>
+                  <textarea
+                    rows={2}
+                    value={secHeadersText}
+                    onChange={(e) => setSecHeadersText(e.target.value)}
+                    placeholder="Authorization: Bearer userB_jwt"
+                    className="w-full bg-slate-950 border border-slate-800 rounded p-2 font-mono text-[11px] text-slate-200"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-400 mb-1">Secondary User/Role Cookies</label>
+                  <textarea
+                    rows={2}
+                    value={secCookiesText}
+                    onChange={(e) => setSecCookiesText(e.target.value)}
+                    placeholder="session_id=userB_cookie"
                     className="w-full bg-slate-950 border border-slate-800 rounded p-2 font-mono text-[11px] text-slate-200"
                   />
                 </div>

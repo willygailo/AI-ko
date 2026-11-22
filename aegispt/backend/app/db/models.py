@@ -65,6 +65,7 @@ class Engagement(Base):
     llm_profile_id: Mapped[str | None] = mapped_column(
         String(32), ForeignKey("llm_profiles.id", ondelete="SET NULL"), nullable=True
     )
+    operator_hints: Mapped[list[str]] = mapped_column(JSON, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
@@ -97,6 +98,15 @@ class Engagement(Base):
     snapshots: Mapped[list["ScanSnapshot"]] = relationship(
         back_populates="engagement", cascade="all, delete-orphan"
     )
+    checklist_items: Mapped[list["SkillChecklistItem"]] = relationship(
+        back_populates="engagement", cascade="all, delete-orphan"
+    )
+    attack_chains: Mapped[list["AttackChain"]] = relationship(
+        back_populates="engagement", cascade="all, delete-orphan"
+    )
+    oob_events: Mapped[list["OOBEvent"]] = relationship(
+        back_populates="engagement", cascade="all, delete-orphan"
+    )
 
 
 class ScopePolicyModel(Base):
@@ -115,6 +125,8 @@ class ScopePolicyModel(Base):
     max_concurrency: Mapped[int] = mapped_column(Integer, default=5)
     custom_headers: Mapped[dict[str, str]] = mapped_column(JSON, default=dict)
     auth_cookies: Mapped[dict[str, str]] = mapped_column(JSON, default=dict)
+    secondary_headers: Mapped[dict[str, str]] = mapped_column(JSON, default=dict)
+    secondary_cookies: Mapped[dict[str, str]] = mapped_column(JSON, default=dict)
     allow_private_ips: Mapped[bool] = mapped_column(Boolean, default=False)
 
     engagement: Mapped["Engagement"] = relationship(back_populates="scope_policy")
@@ -250,7 +262,9 @@ class Finding(Base):
     poc_command: Mapped[str | None] = mapped_column(Text, nullable=True)
     remediation: Mapped[str] = mapped_column(Text, default="")
     tool_source: Mapped[str] = mapped_column(String(64), default="aegispt")
+    corroborated_by: Mapped[list[str]] = mapped_column(JSON, default=list)
     fingerprint: Mapped[str] = mapped_column(String(128), index=True)
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
     engagement: Mapped["Engagement"] = relationship(back_populates="findings")
@@ -315,3 +329,82 @@ class ScanSnapshot(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
     engagement: Mapped["Engagement"] = relationship(back_populates="snapshots")
+
+
+class SkillChecklistItem(Base):
+    __tablename__ = "skill_checklist_items"
+    __table_args__ = (
+        UniqueConstraint("engagement_id", "skill_id", "item_key", name="uq_skill_check_item"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    engagement_id: Mapped[str] = mapped_column(
+        String(32), ForeignKey("engagements.id", ondelete="CASCADE"), index=True
+    )
+    skill_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    skill_title: Mapped[str] = mapped_column(String(200), nullable=False)
+    wstg_id: Mapped[str] = mapped_column(String(64), default="")
+    item_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    item_text: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(32), default="pending"
+    )  # pending|covered|finding|skipped
+    evidence_note: Mapped[str] = mapped_column(Text, default="")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
+
+    engagement: Mapped["Engagement"] = relationship(back_populates="checklist_items")
+
+
+class AttackChain(Base):
+    __tablename__ = "attack_chains"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    engagement_id: Mapped[str] = mapped_column(
+        String(32), ForeignKey("engagements.id", ondelete="CASCADE"), index=True
+    )
+    title: Mapped[str] = mapped_column(String(300), nullable=False)
+    severity: Mapped[str] = mapped_column(String(16), default="high")
+    risk_summary: Mapped[str] = mapped_column(Text, default="")
+    target_url: Mapped[str] = mapped_column(String(2048), default="")
+    steps: Mapped[list[str]] = mapped_column(JSON, default=list)
+    finding_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    engagement: Mapped["Engagement"] = relationship(back_populates="attack_chains")
+
+
+class SkillOutcomeStat(Base):
+    __tablename__ = "skill_outcome_stats"
+    __table_args__ = (
+        UniqueConstraint("tech_signature", "waf_name", "skill_id", name="uq_skill_outcome"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    tech_signature: Mapped[str] = mapped_column(String(120), default="generic")
+    waf_name: Mapped[str] = mapped_column(String(80), default="none")
+    skill_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    runs_count: Mapped[int] = mapped_column(Integer, default=0)
+    findings_count: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
+
+
+class OOBEvent(Base):
+    __tablename__ = "oob_events"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    engagement_id: Mapped[str] = mapped_column(
+        String(32), ForeignKey("engagements.id", ondelete="CASCADE"), index=True
+    )
+    token: Mapped[str] = mapped_column(String(64), index=True)
+    method: Mapped[str] = mapped_column(String(16), default="GET")
+    path: Mapped[str] = mapped_column(String(512), default="")
+    source_ip: Mapped[str] = mapped_column(String(64), default="")
+    headers: Mapped[dict[str, str]] = mapped_column(JSON, default=dict)
+    body_preview: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    engagement: Mapped["Engagement"] = relationship(back_populates="oob_events")

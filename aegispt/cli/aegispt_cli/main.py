@@ -22,6 +22,18 @@ app.add_typer(engagement_app, name="engagement")
 console = Console()
 
 
+def _resolve_engagement_id(client: AegisClient, engagement_id: str) -> str:
+    if engagement_id and engagement_id.lower() != "latest":
+        return engagement_id
+    items = client.get("/api/v1/engagements").json().get("engagements", [])
+    if not items:
+        console.print("[red]No engagements found. Create one first with `./aegispt engagement create ...`[/red]")
+        raise typer.Exit(code=1)
+    chosen = items[0]["id"]
+    console.print(f"[dim]Using latest engagement: {chosen} ({items[0]['name']})[/dim]")
+    return chosen
+
+
 @app.command()
 def serve(
     host: str = typer.Option("127.0.0.1", help="Bind address (localhost recommended)"),
@@ -67,7 +79,7 @@ def doctor(
             "tools_total": len(tools),
             "tools": tools,
             "llm": llm_status,
-            "knowledge_playbooks": len(knowledge_store.search("", limit=20)),
+            "knowledge_playbooks": len(knowledge_store.search("", limit=100)),
         }
 
     if json_output:
@@ -117,12 +129,26 @@ def list_engagements() -> None:
     console.print(table)
 
 
+def _parse_kv(items: list[str], sep: str) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for raw in items:
+        if sep in raw:
+            k, v = raw.split(sep, 1)
+            if k.strip():
+                out[k.strip()] = v.strip()
+    return out
+
+
 @engagement_app.command("create")
 def create_engagement(
     name: str = typer.Option(..., "--name", "-n", help="Engagement name"),
     url: list[str] = typer.Option([], "--url", "-u", help="Allowlisted target URL (repeatable)"),
     domain: list[str] = typer.Option([], "--domain", "-d", help="Allowlisted domain (repeatable)"),
     exclude_path: list[str] = typer.Option([], "--exclude-path", help="Excluded path prefix/glob"),
+    auth_header: list[str] = typer.Option([], "--auth-header", "-H", help="Primary Auth header 'Key: Value' (repeatable)"),
+    auth_cookie: list[str] = typer.Option([], "--auth-cookie", "-C", help="Primary Auth cookie 'name=value' (repeatable)"),
+    secondary_header: list[str] = typer.Option([], "--secondary-header", help="Secondary role header 'Key: Value' for BOLA/IDOR"),
+    secondary_cookie: list[str] = typer.Option([], "--secondary-cookie", help="Secondary role cookie 'name=value' for BOLA/IDOR"),
     mode: str = typer.Option("tiered", "--mode", help="tiered | copilot | lab_autopilot"),
     max_rps: int = typer.Option(15, "--max-rps", help="Max requests per second"),
     allow_private_ips: bool = typer.Option(False, "--allow-private-ips", help="Allow localhost/RFC1918 lab targets"),
@@ -141,6 +167,10 @@ def create_engagement(
             "allowed_urls": url,
             "allowed_domains": domain,
             "excluded_paths": exclude_path,
+            "custom_headers": _parse_kv(auth_header, ":"),
+            "auth_cookies": _parse_kv(auth_cookie, "="),
+            "secondary_headers": _parse_kv(secondary_header, ":"),
+            "secondary_cookies": _parse_kv(secondary_cookie, "="),
             "max_rps": max_rps,
             "allow_private_ips": allow_private_ips,
         },
@@ -167,19 +197,20 @@ def delete_engagement(engagement_id: str = typer.Argument(..., help="Engagement 
 
 @app.command()
 def runs(
-    engagement_id: str = typer.Argument(..., help="Engagement ID"),
+    engagement_id: str = typer.Argument("latest", help="Engagement ID (or 'latest')"),
     log: Optional[str] = typer.Option(None, "--log", help="Print raw stdout/stderr log for a specific run_id"),
 ) -> None:
     """Inspect tool execution runs or read a run's raw stdout/stderr log."""
     client = AegisClient()
+    eng_id = _resolve_engagement_id(client, engagement_id)
     if log:
-        log_text = client.get(f"/api/v1/engagements/{engagement_id}/runs/{log}/log").json().get("log", "")
+        log_text = client.get(f"/api/v1/engagements/{eng_id}/runs/{log}/log").json().get("log", "")
         console.print(Panel(log_text or "(empty log)", title=f"Tool Run Log: {log}", border_style="cyan"))
         return
 
-    detail = client.get(f"/api/v1/engagements/{engagement_id}").json()
+    detail = client.get(f"/api/v1/engagements/{eng_id}").json()
     tool_runs = detail.get("tool_runs") or []
-    table = Table(title=f"Tool Runs for {engagement_id} ({len(tool_runs)})")
+    table = Table(title=f"Tool Runs for {eng_id} ({len(tool_runs)})")
     table.add_column("Run ID", style="cyan")
     table.add_column("Tool")
     table.add_column("Tier", justify="center")
@@ -272,23 +303,25 @@ async def _stream_and_approve(client: AegisClient, engagement_id: str) -> None:
 
 
 @app.command()
-def run(engagement_id: str = typer.Argument(..., help="Engagement ID to execute and stream")) -> None:
+def run(engagement_id: str = typer.Argument("latest", help="Engagement ID to execute and stream (or 'latest')")) -> None:
     """Start an engagement and attach interactive live stream + approval prompt."""
     client = AegisClient()
-    client.post(f"/api/v1/engagements/{engagement_id}/start")
-    console.print(f"[green]Started engagement {engagement_id}. Streaming live events...[/green]")
+    eng_id = _resolve_engagement_id(client, engagement_id)
+    client.post(f"/api/v1/engagements/{eng_id}/start")
+    console.print(f"[green]Started engagement {eng_id}. Streaming live events...[/green]")
     try:
-        asyncio.run(_stream_and_approve(client, engagement_id))
+        asyncio.run(_stream_and_approve(client, eng_id))
     except KeyboardInterrupt:
         console.print("\n[yellow]Detached from stream (engagement continues on server).[/yellow]")
 
 
 @app.command()
-def findings(engagement_id: str = typer.Argument(..., help="Engagement ID")) -> None:
+def findings(engagement_id: str = typer.Argument("latest", help="Engagement ID (or 'latest')")) -> None:
     """Display discovered findings for an engagement."""
     client = AegisClient()
-    items = client.get(f"/api/v1/engagements/{engagement_id}/findings").json().get("findings", [])
-    table = Table(title=f"Findings for {engagement_id} ({len(items)})")
+    eng_id = _resolve_engagement_id(client, engagement_id)
+    items = client.get(f"/api/v1/engagements/{eng_id}/findings").json().get("findings", [])
+    table = Table(title=f"Findings for {eng_id} ({len(items)})")
     table.add_column("Severity")
     table.add_column("Title")
     table.add_column("Target")
@@ -309,13 +342,14 @@ def findings(engagement_id: str = typer.Argument(..., help="Engagement ID")) -> 
 
 @app.command()
 def report(
-    engagement_id: str = typer.Argument(..., help="Engagement ID"),
-    format: str = typer.Option("html", "--format", "-f", help="html | markdown | sarif | json"),
+    engagement_id: str = typer.Argument("latest", help="Engagement ID (or 'latest')"),
+    format: str = typer.Option("html", "--format", "-f", help="html | markdown | sarif | json | poc_sh"),
     out: Optional[Path] = typer.Option(None, "--out", "-o", help="Output file path"),
 ) -> None:
-    """Export assessment report in HTML, Markdown, SARIF, or JSON."""
+    """Export assessment report in HTML, Markdown, SARIF, JSON, or PoC Shell script."""
     client = AegisClient()
-    resp = client.get(f"/api/v1/engagements/{engagement_id}/report", format=format)
+    eng_id = _resolve_engagement_id(client, engagement_id)
+    resp = client.get(f"/api/v1/engagements/{eng_id}/report", format=format)
     if out:
         out.write_text(resp.text, encoding="utf-8")
         console.print(f"[green]Saved {format} report to {out}[/green]")
@@ -324,11 +358,12 @@ def report(
 
 
 @app.command()
-def hypotheses(engagement_id: str = typer.Argument(..., help="Engagement ID")) -> None:
+def hypotheses(engagement_id: str = typer.Argument("latest", help="Engagement ID (or 'latest')")) -> None:
     """List AI-generated security hypotheses and verification status."""
     client = AegisClient()
-    items = client.get(f"/api/v1/engagements/{engagement_id}/hypotheses").json().get("hypotheses", [])
-    table = Table(title=f"Hypotheses for {engagement_id} ({len(items)})")
+    eng_id = _resolve_engagement_id(client, engagement_id)
+    items = client.get(f"/api/v1/engagements/{eng_id}/hypotheses").json().get("hypotheses", [])
+    table = Table(title=f"Hypotheses for {eng_id} ({len(items)})")
     table.add_column("Status")
     table.add_column("Confidence")
     table.add_column("CWE")
@@ -340,10 +375,11 @@ def hypotheses(engagement_id: str = typer.Argument(..., help="Engagement ID")) -
 
 
 @app.command()
-def diff(engagement_id: str = typer.Argument(..., help="Engagement ID")) -> None:
+def diff(engagement_id: str = typer.Argument("latest", help="Engagement ID (or 'latest')")) -> None:
     """Compare baseline vs latest scan snapshot deltas for an engagement."""
     client = AegisClient()
-    data = client.get(f"/api/v1/engagements/{engagement_id}/diff").json()
+    eng_id = _resolve_engagement_id(client, engagement_id)
+    data = client.get(f"/api/v1/engagements/{eng_id}/diff").json()
     if not data.get("has_diff"):
         console.print(f"[yellow]Need at least 2 snapshots to compute diff (found {data.get('snapshots_count', 0)}).[/yellow]")
         return
@@ -363,15 +399,16 @@ def diff(engagement_id: str = typer.Argument(..., help="Engagement ID")) -> None
 
 @app.command()
 def repeat(
-    engagement_id: str = typer.Argument(..., help="Engagement ID"),
+    engagement_id: str = typer.Argument(..., help="Engagement ID (or 'latest')"),
     url: str = typer.Argument(..., help="Target URL inside engagement scope"),
     method: str = typer.Option("GET", "--method", "-X", help="HTTP method"),
     body: Optional[str] = typer.Option(None, "--data", "-d", help="Optional request body"),
 ) -> None:
     """Send an interactive scoped HTTP request through the AegisPT Repeater."""
     client = AegisClient()
+    eng_id = _resolve_engagement_id(client, engagement_id)
     res = client.post(
-        f"/api/v1/engagements/{engagement_id}/repeater",
+        f"/api/v1/engagements/{eng_id}/repeater",
         json_body={"method": method.upper(), "url": url, "body": body},
     ).json()
     console.print(
@@ -382,6 +419,55 @@ def repeat(
             border_style="green" if res["status_code"] < 400 else "yellow",
         )
     )
+
+
+@app.command()
+def steer(
+    hint: str = typer.Argument(..., help="Guidance instruction for the AI planner"),
+    engagement_id: str = typer.Argument("latest", help="Engagement ID (or 'latest')"),
+) -> None:
+    """Send a live steering instruction to guide the engagement planner."""
+    client = AegisClient()
+    eng_id = _resolve_engagement_id(client, engagement_id)
+    res = client.post(f"/api/v1/engagements/{eng_id}/steer", json_body={"hint": hint}).json()
+    console.print(f"[green]Queued steering hint for {eng_id}:[/green] {res['operator_hints'][-1]}")
+
+
+@app.command()
+def chains(engagement_id: str = typer.Argument("latest", help="Engagement ID (or 'latest')")) -> None:
+    """Synthesize and display correlated multi-step attack chains."""
+    client = AegisClient()
+    eng_id = _resolve_engagement_id(client, engagement_id)
+    client.post(f"/api/v1/engagements/{eng_id}/chains/synthesize")
+    detail = client.get(f"/api/v1/engagements/{eng_id}").json()
+    items = detail.get("attack_chains") or []
+    if not items:
+        console.print("[yellow]No multi-step attack chains correlated yet.[/yellow]")
+        return
+    for ch in items:
+        steps_txt = "\n".join(ch.get("steps") or [])
+        console.print(
+            Panel(
+                f"Target: {ch['target_url']}\n{ch['risk_summary']}\n\n{steps_txt}",
+                title=f"[{ch['severity'].upper()}] {ch['title']}",
+                border_style="red" if ch["severity"] == "critical" else "yellow",
+            )
+        )
+
+
+@app.command()
+def checklist(engagement_id: str = typer.Argument("latest", help="Engagement ID (or 'latest')")) -> None:
+    """Display offensive skill methodology checklist coverage."""
+    client = AegisClient()
+    eng_id = _resolve_engagement_id(client, engagement_id)
+    items = client.get(f"/api/v1/engagements/{eng_id}").json().get("checklist_items") or []
+    table = Table(title=f"Skill Checklist Coverage ({len(items)} items)")
+    table.add_column("Skill", style="cyan")
+    table.add_column("Status")
+    table.add_column("Check Item")
+    for it in items:
+        table.add_row(it["skill_title"], it["status"].upper(), it["item_text"])
+    console.print(table)
 
 
 def main() -> None:

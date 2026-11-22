@@ -46,6 +46,8 @@ class ScopePolicy:
     max_concurrency: int = 5
     custom_headers: dict[str, str] = field(default_factory=dict)
     auth_cookies: dict[str, str] = field(default_factory=dict)
+    secondary_headers: dict[str, str] = field(default_factory=dict)
+    secondary_cookies: dict[str, str] = field(default_factory=dict)
     allow_private_ips: bool = False
 
     def __post_init__(self) -> None:
@@ -58,9 +60,18 @@ class ScopePolicy:
         self.max_concurrency = max(1, min(int(self.max_concurrency), 30))
 
         # Validate header keys/values against CRLF injection
-        for k, v in self.custom_headers.items():
-            if UNSAFE_CONTROL_RE.search(k) or UNSAFE_CONTROL_RE.search(str(v)):
-                raise ScopeViolationError(f"Header contains control characters: {k!r}")
+        for header_map in (self.custom_headers, self.secondary_headers):
+            for k, v in header_map.items():
+                if UNSAFE_CONTROL_RE.search(k) or UNSAFE_CONTROL_RE.search(str(v)):
+                    raise ScopeViolationError(f"Header contains control characters: {k!r}")
+
+    @property
+    def has_secondary_auth(self) -> bool:
+        return bool(self.secondary_headers or self.secondary_cookies)
+
+    @staticmethod
+    def build_cookie_header(cookies: dict[str, str]) -> str:
+        return "; ".join(f"{k}={v}" for k, v in cookies.items() if k)
 
     @classmethod
     def from_orm(cls, model) -> "ScopePolicy":
@@ -74,6 +85,8 @@ class ScopePolicy:
             max_concurrency=model.max_concurrency,
             custom_headers=decrypt_dict(model.custom_headers),
             auth_cookies=decrypt_dict(model.auth_cookies),
+            secondary_headers=decrypt_dict(getattr(model, "secondary_headers", None)),
+            secondary_cookies=decrypt_dict(getattr(model, "secondary_cookies", None)),
             allow_private_ips=bool(model.allow_private_ips),
         )
 

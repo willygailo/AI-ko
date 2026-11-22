@@ -26,7 +26,7 @@ async def doctor() -> dict[str, object]:
     knowledge_store.ensure_indexed()
     tools = tool_registry.describe_catalog()
     llm_status = await llm_router.list_models(default_profile_from_settings())
-    kb_count = len(knowledge_store.search("", limit=20))
+    kb_count = len(knowledge_store.search("", limit=100))
     available_count = sum(1 for t in tools if t["available"])
     return {
         "status": "ready",

@@ -1,15 +1,19 @@
 """Findings triage & status management routes."""
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.schemas import FindingCreateInput, FindingUpdateInput, HypothesisUpdateInput
 from app.core.auth import require_api_token
+from app.core.scope import ScopePolicy, ScopeViolationError
 from app.db.database import get_db
-from app.db.models import Engagement, Finding, Hypothesis
+from app.db.models import Engagement, Finding, Hypothesis, ScopePolicyModel
 from app.tools.base import fingerprint_finding
+from app.tools.http_probe import HttpProbeAdapter
 
 router = APIRouter(
     prefix="/api/v1",
@@ -48,13 +52,13 @@ async def list_findings(
                 "poc_command": f.poc_command,
                 "remediation": f.remediation,
                 "tool_source": f.tool_source,
+                "corroborated_by": f.corroborated_by or [f.tool_source],
+                "verified_at": f.verified_at.isoformat() if getattr(f, "verified_at", None) else None,
                 "created_at": f.created_at.isoformat() if f.created_at else None,
             }
             for f in rows
         ]
     }
-
-
 @router.patch("/findings/{finding_id}")
 async def update_finding(
     finding_id: str,
@@ -74,6 +78,65 @@ async def update_finding(
         "id": finding.id,
         "status": finding.status,
         "severity": finding.severity,
+    }
+
+
+@router.post("/findings/{finding_id}/reverify")
+async def reverify_finding(
+    finding_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, object]:
+    finding = await db.get(Finding, finding_id)
+    if not finding:
+        raise HTTPException(status_code=404, detail="Finding not found.")
+    scope_row = (
+        await db.execute(
+            select(ScopePolicyModel).where(ScopePolicyModel.engagement_id == finding.engagement_id)
+        )
+    ).scalar_one_or_none()
+    if not scope_row:
+        raise HTTPException(status_code=400, detail="Scope policy not found.")
+    scope = ScopePolicy.from_orm(scope_row)
+
+    adapter = HttpProbeAdapter()
+    mode = "passive_audit"
+    tl = finding.title.lower()
+    if "graphql" in tl:
+        mode = "graphql_deep_audit"
+    elif "redirect" in tl:
+        mode = "open_redirect_probe"
+    elif "bola" in tl or "authorization" in tl:
+        mode = "differential_bola"
+    elif "ssti" in tl or "template injection" in tl:
+        mode = "ssti_probe"
+    elif "jwt" in tl and "bypass" in tl:
+        mode = "jwt_active_probe"
+
+    try:
+        norm_url = scope.validate_target(finding.target_url)
+    except ScopeViolationError as exc:
+        raise HTTPException(status_code=403, detail=f"Scope blocked reverification: {exc}")
+
+    res = await adapter.execute(
+        engagement_id=finding.engagement_id,
+        tool_run_id=f"reverify-{finding.id}",
+        target=norm_url,
+        raw_args={"mode": mode, "param": finding.parameter},
+        scope=scope,
+    )
+    still_present = any(
+        (finding.cwe_id and nf.cwe_id == finding.cwe_id)
+        or nf.title.lower().split("(")[0].strip() == finding.title.lower().split("(")[0].strip()
+        for nf in res.findings
+    )
+    finding.verified_at = datetime.now(timezone.utc)
+    finding.status = "confirmed" if still_present else "remediated"
+    await db.commit()
+    return {
+        "id": finding.id,
+        "status": finding.status,
+        "still_present": still_present,
+        "verified_at": finding.verified_at.isoformat(),
     }
 
 

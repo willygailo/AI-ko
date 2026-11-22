@@ -71,13 +71,40 @@ def get_session_factory() -> async_sessionmaker[AsyncSession]:
     return _session_factory
 
 
+def _ensure_sqlite_columns(sync_conn) -> None:
+    """Idempotently add new V4 columns when upgrading existing SQLite databases."""
+    migrations: list[tuple[str, str, str]] = [
+        ("engagements", "operator_hints", "JSON DEFAULT '[]'"),
+        ("scope_policies", "secondary_headers", "JSON DEFAULT '{}'"),
+        ("scope_policies", "secondary_cookies", "JSON DEFAULT '{}'"),
+        ("findings", "corroborated_by", "JSON DEFAULT '[]'"),
+        ("findings", "verified_at", "DATETIME"),
+    ]
+    existing_tables = {
+        row[0]
+        for row in sync_conn.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    for table, col, col_def in migrations:
+        if table not in existing_tables:
+            continue
+        cols = {
+            row[1]
+            for row in sync_conn.exec_driver_sql(f"PRAGMA table_info({table})").fetchall()
+        }
+        if col not in cols:
+            sync_conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {col} {col_def}")
+
+
 async def init_db(db_url: str | None = None) -> None:
-    """Create all tables if they do not exist."""
+    """Create missing tables and auto-migrate new columns safely."""
     from app.db import models  # noqa: F401
 
     engine = configure_database(db_url) if db_url else get_engine()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(_ensure_sqlite_columns)
 
 
 async def close_db() -> None:

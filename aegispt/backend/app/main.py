@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select, update
 
-from app.api import approvals, engagements, findings, models_api, reports, system, ws
+from app.api import approvals, engagements, findings, models_api, oob, reports, system, ws
 from app.config import get_settings
 from app.db.database import close_db, init_db, session_scope
 from app.db.models import ApprovalRequest, Engagement, LLMProfile, ToolRun
@@ -98,6 +98,7 @@ def create_app() -> FastAPI:
     app.include_router(approvals.router)
     app.include_router(findings.router)
     app.include_router(reports.router)
+    app.include_router(oob.router)
     app.include_router(ws.router)
 
     frontend_dist = Path(__file__).resolve().parents[2] / "frontend" / "dist"

@@ -1,6 +1,7 @@
-"""Native JS Bundle Route & Secret Miner (Tier 1)."""
+"""Native JS Bundle, Source Map & DOM Sink Miner (Tier 1)."""
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
@@ -19,7 +20,10 @@ from app.tools.base import (
 
 
 SCRIPT_SRC_RE = re.compile(r'<script[^>]+src=["\']([^"\']+\.js[^"\']*)["\']', re.IGNORECASE)
-API_PATH_RE = re.compile(r"""["'`](\/(?:api|rest|v[1-9]|graphql|auth|admin|users)[A-Za-z0-9_./:-]{1,100})["'`]""")
+SOURCE_MAP_RE = re.compile(r"//[#@]\s*sourceMappingURL=([^\s]+)")
+API_PATH_RE = re.compile(r"""["'`](\/(?:api|rest|v[1-9]|graphql|oauth|auth|admin|users)[A-Za-z0-9_./:-]{1,100})["'`]""")
+JSON_KEYS_RE = re.compile(r"JSON\.stringify\s*\(\s*\{([A-Za-z0-9_,\s:\"'$-]{1,240})\}")
+DOM_SINK_RE = re.compile(r"(dangerouslySetInnerHTML|\.innerHTML\s*=|eval\(|addEventListener\s*\(\s*['\"]message['\"])")
 JS_SECRET_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("AWS Access Key ID", re.compile(r"\b(AKIA[0-9A-Z]{16})\b")),
     ("Google API Key", re.compile(r"\b(AIza[0-9A-Za-z_-]{35})\b")),
@@ -36,13 +40,26 @@ def _mask_secret(val: str) -> str:
     return val[:6] + "..." + val[-4:]
 
 
+def _extract_body_keys(js_text: str) -> list[str]:
+    keys: set[str] = set()
+    for m in JSON_KEYS_RE.finditer(js_text[:300000]):
+        chunk = m.group(1)
+        for token in re.findall(r"""(?:^|,)\s*["']?([A-Za-z_][A-Za-z0-9_]{1,30})["']?\s*:""", chunk):
+            if token not in {"method", "headers", "body"}:
+                keys.add(token)
+            if len(keys) >= 25:
+                return sorted(keys)
+    return sorted(keys)
+
+
 def analyze_js_text(js_text: str, source_url: str) -> tuple[list[DiscoveredEndpoint], list[DiscoveredFinding]]:
-    """Extract hidden API paths and masked secret exposures from JavaScript source."""
+    """Extract hidden API paths, JSON body keys, DOM sink indicators, and masked secrets from JS."""
     endpoints: list[DiscoveredEndpoint] = []
     findings: list[DiscoveredFinding] = []
     parsed = urlparse(source_url)
     origin = f"{parsed.scheme}://{parsed.netloc}"
 
+    inferred_body_keys = _extract_body_keys(js_text)
     seen_paths: set[str] = set()
     for m in API_PATH_RE.finditer(js_text):
         p = m.group(1)
@@ -53,6 +70,7 @@ def analyze_js_text(js_text: str, source_url: str) -> tuple[list[DiscoveredEndpo
                     method="GET",
                     url=urljoin(origin, p),
                     path=p,
+                    body_params=inferred_body_keys[:10] if any(t in p for t in ("/login", "/auth", "/register", "/users", "/cart", "/order", "/graphql")) else [],
                     source="js_miner",
                 )
             )
@@ -78,6 +96,22 @@ def analyze_js_text(js_text: str, source_url: str) -> tuple[list[DiscoveredEndpo
                     tool_source="js_miner",
                 )
             )
+
+    dom_sinks = sorted({m.group(1).strip() for m in DOM_SINK_RE.finditer(js_text[:300000])})
+    if dom_sinks:
+        findings.append(
+            DiscoveredFinding(
+                title="Client-Side DOM Injection Sink Indicators Detected",
+                severity="info",
+                target_url=source_url,
+                cwe_id="CWE-79",
+                owasp_category="A03:2021 - Injection",
+                description=f"JavaScript bundle `{source_url}` uses dynamic DOM/message sinks ({', '.join(dom_sinks[:5])}) that warrant manual XSS review.",
+                evidence={"sinks": dom_sinks[:10]},
+                remediation="Sanitize untrusted input before assigning innerHTML/dangerouslySetInnerHTML and validate event.origin in postMessage handlers.",
+                tool_source="js_miner",
+            )
+        )
     return endpoints, findings
 
 
@@ -88,7 +122,7 @@ class JsMinerArgs(BaseModel):
 
 class JsMinerAdapter(BaseToolAdapter):
     name = "js_miner"
-    description = "Fetches in-scope HTML/JS bundles to mine hidden API routes, GraphQL paths, and exposed secrets."
+    description = "Fetches in-scope HTML/JS bundles & source maps to mine hidden API routes, body params, DOM sinks, and secrets."
     tier = 1
     binary_name = None
     args_schema = JsMinerArgs
@@ -110,7 +144,9 @@ class JsMinerAdapter(BaseToolAdapter):
         assert isinstance(args, JsMinerArgs)
         limiter = rate_limiters.get(engagement_id, scope.max_rps)
         is_local = (urlparse(target).hostname or "").lower() in {"127.0.0.1", "localhost", "::1"}
-        headers = {"User-Agent": "AegisPT-JSMiner/0.1", **scope.custom_headers}
+        headers = {"User-Agent": "AegisPT-JSMiner/0.2", **scope.custom_headers}
+        if scope.auth_cookies:
+            headers["Cookie"] = scope.build_cookie_header(scope.auth_cookies)
         endpoints: list[DiscoveredEndpoint] = []
         findings: list[DiscoveredFinding] = []
         scanned_bundles: list[str] = []
@@ -119,7 +155,6 @@ class JsMinerAdapter(BaseToolAdapter):
             verify=False,
             follow_redirects=False,
             timeout=float(args.timeout_seconds),
-            cookies=dict(scope.auth_cookies),
             trust_env=not is_local,
         ) as client:
             bundle_urls: list[str] = []
@@ -146,6 +181,37 @@ class JsMinerAdapter(BaseToolAdapter):
                         eps, fnds = analyze_js_text(r.text[:500000], bu)
                         endpoints.extend(eps)
                         findings.extend(fnds)
+
+                        # Check for exposed sourceMap reference
+                        sm_match = SOURCE_MAP_RE.search(r.text[-4096:])
+                        if sm_match:
+                            map_ref = sm_match.group(1).strip()
+                            if not map_ref.startswith("data:"):
+                                map_url = urljoin(bu, map_ref)
+                                try:
+                                    scope.validate_target(map_url, resolve_dns=False)
+                                    await limiter.acquire()
+                                    rm = await client.get(map_url, headers=headers)
+                                    if rm.status_code == 200 and '"sources"' in rm.text[:2000]:
+                                        m_obj = json.loads(rm.text[:1000000])
+                                        sources = (m_obj.get("sources") or [])[:25]
+                                        findings.append(
+                                            DiscoveredFinding(
+                                                title="Exposed JavaScript Source Map File (.js.map)",
+                                                severity="low",
+                                                target_url=map_url,
+                                                cwe_id="CWE-540",
+                                                owasp_category="A05:2021 - Security Misconfiguration",
+                                                cvss_score=3.5,
+                                                description=f"Public source map `{map_url}` exposes unminified original frontend module paths ({len(m_obj.get('sources') or [])} source files).",
+                                                evidence={"map_url": map_url, "sample_sources": sources},
+                                                poc_command=f"curl -s '{map_url}' | head -c 500",
+                                                remediation="Restrict or remove .js.map files from public production web servers.",
+                                                tool_source=self.name,
+                                            )
+                                        )
+                                except Exception:
+                                    pass
                 except Exception:
                     continue
 
@@ -153,12 +219,12 @@ class JsMinerAdapter(BaseToolAdapter):
             tool_name=self.name,
             exit_code=0,
             duration_ms=0,
-            stdout=f"Scanned {len(scanned_bundles)} JS bundles; extracted {len(endpoints)} routes and {len(findings)} potential secret exposures.",
+            stdout=f"Scanned {len(scanned_bundles)} JS bundles; extracted {len(endpoints)} routes and {len(findings)} potential exposures/leads.",
             endpoints=endpoints,
             findings=findings,
             summary={
                 "bundles_scanned": len(scanned_bundles),
                 "routes_extracted": len(endpoints),
-                "secrets_detected": len(findings),
+                "findings_count": len(findings),
             },
         )

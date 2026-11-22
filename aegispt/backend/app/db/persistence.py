@@ -1,5 +1,7 @@
-"""Shared async SQLite persistence helper for tool discoveries (assets, endpoints, findings)."""
+"""Shared async SQLite persistence helper with cross-tool finding correlation."""
 from __future__ import annotations
+
+from urllib.parse import urlparse
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -8,12 +10,19 @@ from app.db.models import Asset, Endpoint, Finding
 from app.tools.base import ToolResult, fingerprint_finding
 
 
+def _norm_target_key(url: str) -> str:
+    p = urlparse(url or "")
+    if p.scheme and p.netloc:
+        return f"{p.scheme.lower()}://{p.netloc.lower()}{(p.path or '/').rstrip('/') or '/'}"
+    return (url or "").strip().lower().rstrip("/")
+
+
 async def persist_tool_result(
     session: AsyncSession,
     engagement_id: str,
     result: ToolResult,
 ) -> int:
-    """Upsert discovered assets, endpoints, and deduplicated findings into SQLite.
+    """Upsert discovered assets, endpoints, and deduplicated/correlated findings into SQLite.
 
     Returns the number of newly inserted findings.
     """
@@ -95,37 +104,63 @@ async def persist_tool_result(
                 )
             )
 
+    existing_eng_findings = (
+        await session.execute(
+            select(Finding).where(Finding.engagement_id == engagement_id)
+        )
+    ).scalars().all()
+
     for f in result.findings:
         fp = fingerprint_finding(f.tool_source, f.title, f.target_url, f.parameter)
-        existing_f = (
-            await session.execute(
-                select(Finding).where(
-                    Finding.engagement_id == engagement_id,
-                    Finding.fingerprint == fp,
-                )
-            )
-        ).scalar_one_or_none()
-        if not existing_f:
-            session.add(
-                Finding(
-                    engagement_id=engagement_id,
-                    title=f.title,
-                    severity=f.severity,
-                    status="open",
-                    cvss_score=f.cvss_score,
-                    cvss_vector=f.cvss_vector,
-                    cwe_id=f.cwe_id,
-                    owasp_category=f.owasp_category,
-                    target_url=f.target_url,
-                    parameter=f.parameter,
-                    description=f.description,
-                    evidence=f.evidence,
-                    poc_command=f.poc_command,
-                    remediation=f.remediation,
-                    tool_source=f.tool_source,
-                    fingerprint=fp,
-                )
-            )
-            new_findings += 1
+        existing_f = next((ef for ef in existing_eng_findings if ef.fingerprint == fp), None)
+        if existing_f:
+            continue
+
+        # Cross-tool correlation: same CWE + normalized URL path + parameter
+        correlated = None
+        if f.cwe_id:
+            t_key = _norm_target_key(f.target_url)
+            p_key = (f.parameter or "").strip().lower()
+            for ef in existing_eng_findings:
+                if (
+                    ef.cwe_id == f.cwe_id
+                    and _norm_target_key(ef.target_url) == t_key
+                    and (ef.parameter or "").strip().lower() == p_key
+                ):
+                    correlated = ef
+                    break
+
+        if correlated is not None:
+            corr_list = sorted(set(correlated.corroborated_by or [correlated.tool_source]) | {f.tool_source})
+            correlated.corroborated_by = corr_list
+            if f.evidence:
+                correlated.evidence = {
+                    **(correlated.evidence or {}),
+                    f"corroborated_{f.tool_source}": f.evidence,
+                }
+            continue
+
+        row = Finding(
+            engagement_id=engagement_id,
+            title=f.title,
+            severity=f.severity,
+            status="open",
+            cvss_score=f.cvss_score,
+            cvss_vector=f.cvss_vector,
+            cwe_id=f.cwe_id,
+            owasp_category=f.owasp_category,
+            target_url=f.target_url,
+            parameter=f.parameter,
+            description=f.description,
+            evidence=f.evidence,
+            poc_command=f.poc_command,
+            remediation=f.remediation,
+            tool_source=f.tool_source,
+            corroborated_by=[f.tool_source],
+            fingerprint=fp,
+        )
+        session.add(row)
+        existing_eng_findings.append(row)
+        new_findings += 1
 
     return new_findings

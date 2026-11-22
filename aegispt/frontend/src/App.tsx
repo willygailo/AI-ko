@@ -51,6 +51,9 @@ const EVENT_COLORS: Record<string, string> = {
   approval_required: "text-amber-300",
   approval_resolved: "text-sky-300",
   planner_fallback: "text-amber-400",
+  attack_chain_synthesized: "text-orange-300 font-semibold",
+  operator_steer: "text-cyan-300 font-semibold",
+  oob_callback_received: "text-rose-300 font-semibold",
   executive_summary: "text-cyan-200 font-semibold",
   engagement_finished: "text-emerald-400 font-bold",
   engagement_failed: "text-red-400 font-bold",
@@ -58,6 +61,8 @@ const EVENT_COLORS: Record<string, string> = {
 
 type WorkspaceTab =
   | "graph"
+  | "chains"
+  | "checklist"
   | "endpoints"
   | "findings"
   | "hypotheses"
@@ -93,6 +98,8 @@ export default function App() {
   const [manualArgsJson, setManualArgsJson] = useState("");
   const [manualError, setManualError] = useState("");
   const [manualBusy, setManualBusy] = useState(false);
+  const [steerInput, setSteerInput] = useState("");
+  const [steerBusy, setSteerBusy] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
   const logEndRef = useRef<HTMLDivElement | null>(null);
@@ -156,6 +163,9 @@ export default function App() {
             "manual_tool_completed",
             "approval_required",
             "approval_resolved",
+            "attack_chain_synthesized",
+            "operator_steer",
+            "oob_callback_received",
             "executive_summary",
             "engagement_finished",
             "engagement_failed",
@@ -458,6 +468,13 @@ export default function App() {
             <div className="flex flex-wrap items-center gap-1.5">
               {[
                 { id: "graph", label: "Attack Graph" },
+                { id: "chains", label: `Chains (${detail.attack_chains?.length || 0})` },
+                {
+                  id: "checklist",
+                  label: `Skills (${
+                    (detail.checklist_items || []).filter((c) => c.status !== "pending").length
+                  }/${detail.checklist_items?.length || 0})`,
+                },
                 { id: "endpoints", label: `Endpoints (${detail.endpoints.length})` },
                 { id: "findings", label: `Findings (${detail.findings.length})` },
                 { id: "hypotheses", label: `Hypotheses (${detail.hypotheses?.length || 0})` },
@@ -489,6 +506,78 @@ export default function App() {
                   findings={detail.findings}
                   onPivotTarget={(u) => setManualTarget(u)}
                 />
+              )}
+
+              {activeTab === "chains" && (
+                <div className="h-full flex flex-col bg-slate-900/60 border border-slate-800 rounded-xl overflow-hidden text-xs">
+                  <div className="flex items-center justify-between px-4 py-2.5 border-b border-slate-800 bg-slate-900">
+                    <span className="font-semibold uppercase tracking-wider text-slate-300">
+                      Synthesized Attack Chains ({detail.attack_chains?.length || 0})
+                    </span>
+                    <button
+                      onClick={() => api.synthesizeChains(detail.id).then(() => refreshDetail(detail.id))}
+                      className="px-2.5 py-1 rounded bg-cyan-600 hover:bg-cyan-500 text-white font-semibold"
+                    >
+                      Synthesize Chains
+                    </button>
+                  </div>
+                  <div className="flex-1 overflow-auto p-3 space-y-3">
+                    {(!detail.attack_chains || detail.attack_chains.length === 0) && (
+                      <div className="text-slate-500 text-center mt-8">
+                        No multi-step chains correlated yet. Run an engagement or click "Synthesize Chains".
+                      </div>
+                    )}
+                    {(detail.attack_chains || []).map((ch) => (
+                      <div key={ch.id} className="bg-slate-950/70 border border-slate-800 rounded-xl p-3 space-y-1.5">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-bold text-slate-100">{ch.title}</span>
+                          <span className="px-2 py-0.5 rounded bg-orange-500/20 text-orange-300 uppercase text-[10px] font-bold">
+                            {ch.severity}
+                          </span>
+                        </div>
+                        <div className="text-slate-300">{ch.risk_summary}</div>
+                        <ul className="list-disc pl-5 text-[11px] text-slate-400 space-y-0.5">
+                          {(ch.steps || []).map((st, sIdx) => (
+                            <li key={sIdx}>{st}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {activeTab === "checklist" && (
+                <div className="h-full bg-slate-900/60 border border-slate-800 rounded-xl overflow-auto divide-y divide-slate-800/70 text-xs">
+                  {(!detail.checklist_items || detail.checklist_items.length === 0) && (
+                    <div className="p-6 text-center text-slate-500">
+                      Offensive skill methodology items activate automatically as target signals are detected.
+                    </div>
+                  )}
+                  {(detail.checklist_items || []).map((it) => (
+                    <div key={it.id} className="p-3 flex items-start justify-between gap-3">
+                      <div className="space-y-0.5">
+                        <div className="font-semibold text-cyan-300">
+                          {it.skill_title}{" "}
+                          <span className="text-[10px] text-slate-500 font-normal">({it.wstg_id})</span>
+                        </div>
+                        <div className="text-slate-200">{it.item_text}</div>
+                        {it.evidence_note && <div className="text-[11px] text-emerald-300">{it.evidence_note}</div>}
+                      </div>
+                      <span
+                        className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase shrink-0 ${
+                          it.status === "finding"
+                            ? "bg-amber-500/20 text-amber-300"
+                            : it.status === "covered"
+                            ? "bg-emerald-500/20 text-emerald-300"
+                            : "bg-slate-800 text-slate-400"
+                        }`}
+                      >
+                        {it.status}
+                      </span>
+                    </div>
+                  ))}
+                </div>
               )}
 
               {activeTab === "endpoints" && (
@@ -559,6 +648,10 @@ export default function App() {
                   engagementId={detail.id}
                   findings={detail.findings}
                   onRefresh={() => refreshDetail(detail.id)}
+                  onSendToRepeater={(u) => {
+                    setRepeaterUrl(u);
+                    setActiveTab("repeater");
+                  }}
                 />
               )}
 
@@ -776,6 +869,36 @@ export default function App() {
                 ))}
                 <div ref={logEndRef} />
               </div>
+
+              <form
+                onSubmit={async (e) => {
+                  e.preventDefault();
+                  if (!steerInput.trim() || !detail) return;
+                  setSteerBusy(true);
+                  try {
+                    await api.steerEngagement(detail.id, steerInput.trim());
+                    setSteerInput("");
+                    await refreshDetail(detail.id);
+                  } finally {
+                    setSteerBusy(false);
+                  }
+                }}
+                className="flex gap-2 p-2 border-t border-slate-800 bg-slate-900/90 text-xs"
+              >
+                <input
+                  value={steerInput}
+                  onChange={(e) => setSteerInput(e.target.value)}
+                  placeholder="Steer AI Brain (e.g. 'Focus on GraphQL, JWT alg=none & checkout race')..."
+                  className="flex-1 bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1.5 text-slate-200"
+                />
+                <button
+                  disabled={steerBusy}
+                  type="submit"
+                  className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-semibold"
+                >
+                  {steerBusy ? "..." : "Steer"}
+                </button>
+              </form>
             </div>
 
             {/* Scoped Quick Tool Runner */}
@@ -792,10 +915,14 @@ export default function App() {
                   onChange={(e) => setManualTool(e.target.value)}
                   className="bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1.5 text-white font-mono"
                 >
-                  <option value="http_probe">http_probe (T1/3)</option>
+                  <option value="http_probe">http_probe (T1/2/3)</option>
                   <option value="js_miner">js_miner (T1)</option>
+                  <option value="spa_inspector">spa_inspector (T1)</option>
+                  <option value="trufflehog">trufflehog (T1)</option>
+                  <option value="gitleaks">gitleaks (T1)</option>
                   <option value="subfinder">subfinder (T1)</option>
                   <option value="dnsx">dnsx (T1)</option>
+                  <option value="paramspider">paramspider (T1)</option>
                   <option value="httpx">httpx (T1)</option>
                   <option value="whatweb">whatweb (T1)</option>
                   <option value="wafw00f">wafw00f (T1)</option>
@@ -807,7 +934,8 @@ export default function App() {
                   <option value="feroxbuster">feroxbuster (T2)</option>
                   <option value="arjun">arjun (T2)</option>
                   <option value="nikto">nikto (T2)</option>
-                  <option value="nuclei">nuclei (T2)</option>
+                  <option value="wpscan">wpscan (T2)</option>
+                  <option value="nuclei">nuclei (T2/3)</option>
                   <option value="zaproxy">zaproxy (T2/3)</option>
                   <option value="dalfox">dalfox (T3)</option>
                   <option value="sqlmap">sqlmap (T3)</option>

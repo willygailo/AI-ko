@@ -17,7 +17,7 @@ PARAM_BLOCK_RE = re.compile(
 
 
 class SqlmapArgs(BaseModel):
-    method: Literal["GET", "POST"] = "GET"
+    method: Literal["GET", "POST", "PUT", "PATCH"] = "GET"
     data: str | None = None
     param: str | None = None
     level: int = Field(default=1, ge=1, le=2)
@@ -60,8 +60,13 @@ class SqlmapAdapter(BaseToolAdapter):
             str(out_dir),
             "--answers=follow=N,quit=N",
         ]
-        if args.method == "POST" and args.data:
-            argv.extend(["--data", args.data])
+        if args.method in {"POST", "PUT", "PATCH"} and args.data:
+            argv.extend(["--method", args.method, "--data", args.data])
+            stripped = args.data.lstrip()
+            if (stripped.startswith("{") or stripped.startswith("[")) and not any(
+                k.lower() == "content-type" for k in scope.custom_headers
+            ):
+                argv.extend(["--header", "Content-Type: application/json"])
         if args.param:
             argv.extend(["-p", args.param])
         for k, v in scope.custom_headers.items():

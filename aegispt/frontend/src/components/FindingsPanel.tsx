@@ -1,11 +1,12 @@
 import React, { useState } from "react";
-import { Download, CheckCircle2, XCircle, Shield } from "lucide-react";
+import { Download, CheckCircle2, XCircle, Shield, RefreshCw, Send } from "lucide-react";
 import { FindingItem, api } from "../api/client";
 
 interface Props {
   engagementId: string;
   findings: FindingItem[];
   onRefresh: () => Promise<void>;
+  onSendToRepeater?: (url: string) => void;
 }
 
 const SEV_BADGE: Record<string, string> = {
@@ -16,15 +17,31 @@ const SEV_BADGE: Record<string, string> = {
   info: "bg-slate-500/20 text-slate-300 border-slate-500/40",
 };
 
-export const FindingsPanel: React.FC<Props> = ({ engagementId, findings, onRefresh }) => {
+export const FindingsPanel: React.FC<Props> = ({
+  engagementId,
+  findings,
+  onRefresh,
+  onSendToRepeater,
+}) => {
   const [selected, setSelected] = useState<FindingItem | null>(findings[0] || null);
   const [sevFilter, setSevFilter] = useState<string>("all");
+  const [verifyingId, setVerifyingId] = useState<string>("");
 
   const filtered = findings.filter((f) => sevFilter === "all" || f.severity === sevFilter);
 
   const updateStatus = async (id: string, status: FindingItem["status"]) => {
     await api.updateFinding(id, { status });
     await onRefresh();
+  };
+
+  const handleReverify = async (id: string) => {
+    setVerifyingId(id);
+    try {
+      await api.reverifyFinding(id);
+      await onRefresh();
+    } finally {
+      setVerifyingId("");
+    }
   };
 
   return (
@@ -51,13 +68,13 @@ export const FindingsPanel: React.FC<Props> = ({ engagementId, findings, onRefre
         </div>
 
         <div className="flex items-center gap-1.5">
-          {(["html", "markdown", "sarif"] as const).map((fmt) => (
+          {(["html", "markdown", "sarif", "poc_sh"] as const).map((fmt) => (
             <button
               key={fmt}
               onClick={() => api.downloadReport(engagementId, fmt)}
               className="flex items-center gap-1 px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 text-[11px] font-medium border border-slate-700"
             >
-              <Download className="w-3 h-3" /> {fmt.toUpperCase()}
+              <Download className="w-3 h-3" /> {fmt === "poc_sh" ? "PoC .sh" : fmt.toUpperCase()}
             </button>
           ))}
         </div>
@@ -109,7 +126,22 @@ export const FindingsPanel: React.FC<Props> = ({ engagementId, findings, onRefre
                     {selected.parameter ? ` • param=${selected.parameter}` : ""}
                   </div>
                 </div>
-                <div className="flex items-center gap-1.5 shrink-0">
+                <div className="flex items-center gap-1.5 shrink-0 flex-wrap justify-end">
+                  <button
+                    disabled={verifyingId === selected.id}
+                    onClick={() => handleReverify(selected.id)}
+                    className="flex items-center gap-1 px-2 py-1 rounded bg-cyan-950/60 border border-cyan-700/60 text-cyan-300 hover:bg-cyan-900/70 disabled:opacity-50"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" /> {verifyingId === selected.id ? "..." : "Re-Verify"}
+                  </button>
+                  {onSendToRepeater && (
+                    <button
+                      onClick={() => onSendToRepeater(selected.target_url)}
+                      className="flex items-center gap-1 px-2 py-1 rounded bg-indigo-950/60 border border-indigo-700/60 text-indigo-300 hover:bg-indigo-900/70"
+                    >
+                      <Send className="w-3.5 h-3.5" /> Repeat
+                    </button>
+                  )}
                   <button
                     onClick={() => updateStatus(selected.id, "confirmed")}
                     className="flex items-center gap-1 px-2 py-1 rounded bg-emerald-950/60 border border-emerald-700/60 text-emerald-300 hover:bg-emerald-900/70"
@@ -135,6 +167,11 @@ export const FindingsPanel: React.FC<Props> = ({ engagementId, findings, onRefre
                 <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-300">
                   {selected.owasp_category ?? "OWASP WSTG"}
                 </span>
+                {selected.corroborated_by && selected.corroborated_by.length > 0 && (
+                  <span className="px-2 py-0.5 rounded bg-cyan-950/60 border border-cyan-800/50 text-cyan-300">
+                    Sources: {selected.corroborated_by.join(", ")}
+                  </span>
+                )}
               </div>
 
               <div className="bg-slate-950/70 border border-slate-800 rounded-lg p-3">

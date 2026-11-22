@@ -91,8 +91,9 @@ def test_jwt_passive_audit():
 def test_knowledge_base_has_12_playbooks(tmp_path: Path):
     kb = KnowledgeStore(db_path=tmp_path / "kb.db")
     kb.ensure_indexed()
-    all_pbs = kb.search("", limit=20)
-    assert len(all_pbs) == 12
+    all_pbs = kb.search("", limit=50)
+    assert len([p for p in all_pbs if p["id"].startswith("wstg-")]) == 12
+    assert len(all_pbs) >= 21
     gql = kb.search("graphql introspection", limit=3)
     assert any(p["id"] == "wstg-graphql-hardening" for p in gql)
 

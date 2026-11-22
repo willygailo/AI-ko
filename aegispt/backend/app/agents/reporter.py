@@ -6,7 +6,7 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
-from app.db.models import Asset, Endpoint, Engagement, Finding, ToolRun
+from app.db.models import Asset, AttackChain, Endpoint, Engagement, Finding, ToolRun
 
 
 SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
@@ -77,6 +77,7 @@ def render_markdown_report(
     endpoints: list[Endpoint],
     findings: list[Finding],
     runs: list[ToolRun],
+    chains: list[AttackChain] | None = None,
 ) -> str:
     active = [f for f in _sorted_findings(findings) if f.status != "false_positive"]
     counts = _severity_counts(findings)
@@ -117,6 +118,21 @@ def render_markdown_report(
         lines.append(
             f"| {a.asset_type} | `{a.value}` | {a.status_code or '-'} | {a.waf or '-'} | {techs} |"
         )
+
+    if chains:
+        lines.extend(["", "## Synthesized Attack Chains", ""])
+        for c_idx, ch in enumerate(chains, start=1):
+            lines.extend(
+                [
+                    f"### Chain {c_idx}. [{ch.severity.upper()}] {ch.title}",
+                    "",
+                    f"- **Target:** `{ch.target_url}`",
+                    f"- **Risk Summary:** {ch.risk_summary}",
+                    "",
+                    *(f"- {st}" for st in (ch.steps or [])),
+                    "",
+                ]
+            )
 
     lines.extend(["", "## Findings Detail", ""])
     if not active:
@@ -161,6 +177,7 @@ def render_html_report(
     endpoints: list[Endpoint],
     findings: list[Finding],
     runs: list[ToolRun],
+    chains: list[AttackChain] | None = None,
 ) -> str:
     active = [f for f in _sorted_findings(findings) if f.status != "false_positive"]
     counts = _severity_counts(findings)
@@ -223,6 +240,19 @@ def render_html_report(
         f"<td>{html.escape(', '.join((a.technologies or [])[:6]) or '-')}</td></tr>"
         for a in assets[:60]
     )
+
+    chains_html = ""
+    if chains:
+        chain_cards = []
+        for c_idx, ch in enumerate(chains, start=1):
+            steps_li = "".join(f"<li>{html.escape(st)}</li>" for st in (ch.steps or []))
+            chain_cards.append(
+                f'<article class="finding"><div class="finding-head">'
+                f'<span class="badge" style="background:{sev_colors.get(ch.severity, "#f97316")}">{html.escape(ch.severity.upper())}</span>'
+                f"<h3>Chain {c_idx}. {html.escape(ch.title)}</h3></div>"
+                f"<p>{html.escape(ch.risk_summary)}</p><ul>{steps_li}</ul></article>"
+            )
+        chains_html = f"<section><h2>Synthesized Attack Chains ({len(chains)})</h2>{''.join(chain_cards)}</section>"
 
     return f"""<!doctype html>
 <html lang="en">
@@ -304,6 +334,7 @@ def render_html_report(
         <tbody>{asset_rows or '<tr><td colspan="5">No assets recorded.</td></tr>'}</tbody>
       </table>
     </section>
+    {chains_html}
     <section>
       <h2>Findings ({len(active)})</h2>
       {''.join(findings_html) or '<p>No active findings recorded.</p>'}
@@ -370,3 +401,30 @@ def render_sarif_report(engagement: Engagement, findings: list[Finding]) -> dict
             }
         ],
     }
+
+
+def render_poc_script(engagement: Engagement, findings: list[Finding]) -> str:
+    """Generate an executable bash verification regression script for confirmed/open findings."""
+    active = [f for f in _sorted_findings(findings) if f.status != "false_positive" and f.poc_command]
+    lines = [
+        "#!/usr/bin/env bash",
+        f"# AegisPT Verification Replay Script — {engagement.name} ({engagement.id})",
+        "# Run ONLY against authorized scope targets.",
+        "set -uo pipefail",
+        "",
+    ]
+    if not active:
+        lines.append("echo 'No reproduction commands recorded for active findings.'")
+        return "\n".join(lines) + "\n"
+
+    for idx, f in enumerate(active, start=1):
+        safe_title = f.title.replace("'", "")
+        lines.extend(
+            [
+                f"echo '=== [{idx}] [{f.severity.upper()}] {safe_title} ==='",
+                f.poc_command or "",
+                "echo ''",
+                "",
+            ]
+        )
+    return "\n".join(lines)

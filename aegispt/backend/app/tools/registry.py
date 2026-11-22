@@ -9,6 +9,7 @@ from app.tools.dalfox import DalfoxAdapter
 from app.tools.dnsx_tool import DnsxAdapter
 from app.tools.feroxbuster_tool import FeroxbusterAdapter
 from app.tools.ffuf import FfufAdapter
+from app.tools.gitleaks_tool import GitleaksAdapter
 from app.tools.http_probe import HttpProbeAdapter
 from app.tools.httpx_tool import HttpxAdapter
 from app.tools.js_miner import JsMinerAdapter
@@ -17,11 +18,15 @@ from app.tools.naabu_tool import NaabuAdapter
 from app.tools.nikto_tool import NiktoAdapter
 from app.tools.nmap_tool import NmapAdapter
 from app.tools.nuclei import NucleiAdapter
+from app.tools.paramspider_tool import ParamspiderAdapter
+from app.tools.spa_inspector import SpaInspectorAdapter
 from app.tools.sqlmap import SqlmapAdapter
 from app.tools.sslscan_tool import SslscanAdapter
 from app.tools.subfinder import SubfinderAdapter
+from app.tools.trufflehog_tool import TrufflehogAdapter
 from app.tools.wafw00f import Wafw00fAdapter
 from app.tools.whatweb import WhatWebAdapter
+from app.tools.wpscan_tool import WpscanAdapter
 from app.tools.zaproxy import ZapAdapter
 
 
@@ -30,8 +35,12 @@ class ToolRegistry:
         adapters: list[BaseToolAdapter] = [
             HttpProbeAdapter(),
             JsMinerAdapter(),
+            SpaInspectorAdapter(),
+            TrufflehogAdapter(),
+            GitleaksAdapter(),
             SubfinderAdapter(),
             DnsxAdapter(),
+            ParamspiderAdapter(),
             HttpxAdapter(),
             KatanaAdapter(),
             WhatWebAdapter(),
@@ -43,6 +52,7 @@ class ToolRegistry:
             FeroxbusterAdapter(),
             ArjunAdapter(),
             NiktoAdapter(),
+            WpscanAdapter(),
             NucleiAdapter(),
             DalfoxAdapter(),
             SqlmapAdapter(),

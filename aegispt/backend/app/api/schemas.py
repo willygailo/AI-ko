@@ -15,7 +15,13 @@ class ScopePolicyInput(BaseModel):
     max_concurrency: int = Field(default=5, ge=1, le=30)
     custom_headers: dict[str, str] = Field(default_factory=dict)
     auth_cookies: dict[str, str] = Field(default_factory=dict)
+    secondary_headers: dict[str, str] = Field(default_factory=dict)
+    secondary_cookies: dict[str, str] = Field(default_factory=dict)
     allow_private_ips: bool = False
+
+
+class SteerInput(BaseModel):
+    hint: str = Field(min_length=2, max_length=600)
 
 
 class EngagementCreate(BaseModel):

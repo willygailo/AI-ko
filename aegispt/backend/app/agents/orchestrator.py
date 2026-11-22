@@ -1,4 +1,4 @@
-"""Multi-Agent State-Graph Orchestrator with Tiered Approval & Deterministic Fallback."""
+"""Cognitive Multi-Skill State-Graph Orchestrator with Critic, Self-Recovery, & Chaining."""
 from __future__ import annotations
 
 import asyncio
@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 
 from sqlalchemy import select
 
+from app.agents.chainer import synthesize_attack_chains
 from app.agents.graph_context import build_graph_context
 from app.core.events import event_bus
 from app.core.policy import approval_coordinator
@@ -20,6 +21,8 @@ from app.db.models import (
     Hypothesis,
     LLMProfile,
     ScopePolicyModel,
+    SkillChecklistItem,
+    SkillOutcomeStat,
     ToolRun,
 )
 from app.db.persistence import persist_tool_result
@@ -31,17 +34,27 @@ from app.tools.base import ToolResult
 from app.tools.registry import tool_registry
 
 
-PLANNER_SYSTEM_PROMPT = """You are AegisPT Planner, an expert authorized Web Application & API Security Assessment Orchestrator.
-Given the current compact Attack-Surface Graph, relevant OWASP WSTG/API playbooks, and the available typed tools, decide the next 1-3 concrete tool executions.
+PLANNER_SYSTEM_PROMPT = """You are AegisPT Planner, a cognitive multi-skill Web Application & API Security Assessment Orchestrator.
+Given the Risk-Ranked Attack-Surface Graph, activated Offensive Skill Checklists, WAF posture, multi-role auth availability, live operator hints, and recent feedback, decide the next 1-3 highest-value tool calls.
 
-Rules:
-1. Only propose targets strictly within the engagement's allowlisted hosts/URLs.
-2. Do not repeat identical (tool_name, target, args) calls already completed in recent_runs.
-3. Use Tier 1/2 tools (http_probe, katana, whatweb, wafw00f, ffuf, arjun, nuclei) for mapping and safe detection before proposing Tier 3 tools (sqlmap, dalfox, nuclei with include_intrusive=true, http_probe replay_request, zaproxy active_scan).
-4. Set should_stop=true once attack surface mapping, safe vulnerability checks, and key hypothesis verification steps are exhausted.
-5. Output ONLY valid JSON matching this schema:
+Cognitive Rules:
+1. STRICT SCOPE: Only propose targets strictly within allowlisted hosts/URLs (never propose out-of-scope domains).
+2. NO DUPLICATES & CRITIC CHECK: Do not repeat identical (tool_name, target, args) calls in recent_runs or re-test a (target, param) pair with a disproven hypothesis using the same tool.
+3. SKILL-DRIVEN ROUTING:
+   - GraphQL paths -> `http_probe` {"mode": "graphql_deep_audit"} (Tier 2).
+   - OAuth / OIDC hints -> `http_probe` {"mode": "oauth_audit"} (Tier 2).
+   - WordPress detected -> `wpscan` (Tier 2).
+   - JS secret hunting -> `trufflehog` / `gitleaks` / `js_miner` (Tier 1).
+   - Dynamic routes lacking params -> `arjun` (Tier 2) before active probes.
+   - Mutating / auth-sensitive APIs -> `http_probe` {"mode": "differential_bola"} (Tier 3, leverages multi-role secondary auth when configured) or `bfla_verb_tamper` (Tier 3).
+   - JWT observed -> `http_probe` {"mode": "jwt_active_probe"} (Tier 3).
+   - Commerce/coupon/vote/transfer endpoints -> `http_probe` {"mode": "race_burst_probe"} (Tier 3).
+   - Query OR body parameters -> `dalfox` / `sqlmap` (pass method="POST" & JSON data for body_params) / `http_probe` (`ssti_probe`, `open_redirect_probe`, `hpp_and_content_switch`) (Tier 3).
+4. ADAPTIVE RECOVERY: If `recent_feedback` shows a block/rejection or `waf_detected` is set, pivot technique or respect operator notes instead of repeating blocked calls.
+5. LIVE STEERING: Prioritize any instructions listed in `operator_hints`.
+6. Output ONLY valid JSON matching this schema:
 {
-  "thought": "brief reasoning",
+  "thought": "brief reasoning referencing active skills and target risks",
   "phase": "recon|assessment|verification|reporting|complete",
   "proposed_tools": [
     {"tool_name": "name", "target": "url_or_domain", "args": {}, "rationale": "why", "risk_summary": "impact"}
@@ -59,8 +72,9 @@ class EngagementOrchestrator:
         self.engagement_id = engagement_id
         self._stop_requested = False
         self._pause_event = asyncio.Event()
-        self._pause_event.set()  # Set = not paused
+        self._pause_event.set()
         self._executed_signatures: set[str] = set()
+        self._feedback_history: list[str] = []
 
     def request_stop(self) -> None:
         self._stop_requested = True
@@ -119,6 +133,89 @@ class EngagementOrchestrator:
 
             return eng, scope, llm_cfg, fallbacks
 
+    async def _sync_skill_checklist(
+        self,
+        graph: dict[str, Any],
+        tool_name: str | None = None,
+        new_findings: int = 0,
+    ) -> None:
+        """Persist activated skill checklist items and mark coverage as tools execute."""
+        active_skills = graph.get("active_skills") or []
+        if not active_skills:
+            return
+        async with session_scope() as session:
+            for sk in active_skills:
+                sk_id = sk["id"]
+                all_meta = next((s for s in knowledge_store.list_all_skills() if s["id"] == sk_id), None)
+                rec_tools = set((all_meta or {}).get("recommended_tools") or sk.get("recommended_tools") or [])
+                for idx, item_txt in enumerate(sk.get("checklist") or []):
+                    item_key = f"{sk_id}:{idx}"
+                    row = (
+                        await session.execute(
+                            select(SkillChecklistItem).where(
+                                SkillChecklistItem.engagement_id == self.engagement_id,
+                                SkillChecklistItem.skill_id == sk_id,
+                                SkillChecklistItem.item_key == item_key,
+                            )
+                        )
+                    ).scalar_one_or_none()
+                    if not row:
+                        row = SkillChecklistItem(
+                            engagement_id=self.engagement_id,
+                            skill_id=sk_id,
+                            skill_title=sk["title"],
+                            wstg_id=sk.get("wstg_id") or "",
+                            item_key=item_key,
+                            item_text=item_txt,
+                            status="pending",
+                        )
+                        session.add(row)
+                    if tool_name and (tool_name in rec_tools or tool_name in item_txt):
+                        if new_findings > 0:
+                            row.status = "finding"
+                            row.evidence_note = f"{tool_name} confirmed {new_findings} finding(s)."
+                        elif row.status == "pending":
+                            row.status = "covered"
+                            row.evidence_note = f"Executed `{tool_name}` check."
+
+    async def _record_skill_outcome(
+        self,
+        graph: dict[str, Any],
+        tool_name: str,
+        new_findings: int,
+    ) -> None:
+        techs = sorted({t.lower() for a in graph.get("assets", []) for t in (a.get("technologies") or [])})
+        tech_sig = ",".join(techs[:3]) or "generic"
+        waf_name = str(graph.get("waf_detected") or "none").lower()[:80]
+        matching_skills = [
+            sk["id"]
+            for sk in (graph.get("active_skills") or [])
+            if tool_name in (sk.get("recommended_tools") or [])
+        ] or [f"tool:{tool_name}"]
+
+        async with session_scope() as session:
+            for sk_id in matching_skills[:3]:
+                row = (
+                    await session.execute(
+                        select(SkillOutcomeStat).where(
+                            SkillOutcomeStat.tech_signature == tech_sig[:120],
+                            SkillOutcomeStat.waf_name == waf_name,
+                            SkillOutcomeStat.skill_id == sk_id,
+                        )
+                    )
+                ).scalar_one_or_none()
+                if not row:
+                    row = SkillOutcomeStat(
+                        tech_signature=tech_sig[:120],
+                        waf_name=waf_name,
+                        skill_id=sk_id,
+                        runs_count=0,
+                        findings_count=0,
+                    )
+                    session.add(row)
+                row.runs_count += 1
+                row.findings_count += max(0, new_findings)
+
     async def _persist_hypotheses(self, hypotheses: list[Any]) -> None:
         if not hypotheses:
             return
@@ -172,6 +269,32 @@ class EngagementOrchestrator:
         async with session_scope() as session:
             return await persist_tool_result(session, self.engagement_id, result)
 
+    def _critic_filter_proposals(
+        self, proposals: list[ProposedToolCall], graph: dict[str, Any]
+    ) -> list[ProposedToolCall]:
+        """Self-critic gate preventing redundant disproven checks or mismatched stack tools."""
+        tech_blob = " ".join(
+            str(t).lower() for a in graph.get("assets", []) for t in (a.get("technologies") or [])
+        )
+        ep_blob = " ".join(str(ep.get("url") or "").lower() for ep in graph.get("endpoints", []))
+        has_wp = "wordpress" in tech_blob or "wp-content" in ep_blob or "wp-json" in ep_blob
+        disproven_urls = {
+            h.get("target_url")
+            for h in (graph.get("hypotheses") or [])
+            if h.get("status") == "disproven"
+        }
+
+        kept: list[ProposedToolCall] = []
+        for prop in proposals:
+            if prop.tool_name == "wpscan" and not has_wp:
+                self._feedback_history.append("Critic skipped wpscan (no WordPress signal detected).")
+                continue
+            if prop.tool_name in {"dalfox", "sqlmap"} and prop.target in disproven_urls:
+                self._feedback_history.append(f"Critic avoided re-testing disproven target `{prop.target}` with `{prop.tool_name}`.")
+                continue
+            kept.append(prop)
+        return kept
+
     async def _dispatch_tool(
         self,
         *,
@@ -180,6 +303,7 @@ class EngagementOrchestrator:
         autonomy_mode: str,
         tier2_auto: bool,
         agent_name: str,
+        graph: dict[str, Any] | None = None,
     ) -> bool:
         if not await self._wait_if_paused():
             return False
@@ -192,6 +316,7 @@ class EngagementOrchestrator:
         try:
             adapter = tool_registry.get(proposal.tool_name)
         except KeyError:
+            self._feedback_history.append(f"Unknown tool `{proposal.tool_name}` requested; choose from catalog.")
             await event_bus.publish(
                 engagement_id=self.engagement_id,
                 event_type="tool_blocked",
@@ -200,13 +325,14 @@ class EngagementOrchestrator:
             )
             return False
 
-        available, bin_info = adapter.is_available()
+        available, _ = adapter.is_available()
         if not available:
+            self._feedback_history.append(f"Tool `{adapter.name}` unavailable on host; pick another adapter.")
             await event_bus.publish(
                 engagement_id=self.engagement_id,
                 event_type="tool_skipped",
                 agent_name=agent_name,
-                message=f"Skipped `{adapter.name}` (binary not installed on host).",
+                message=f"Skipped `{adapter.name}` (binary/runtime not available on host).",
             )
             return False
 
@@ -215,6 +341,7 @@ class EngagementOrchestrator:
             norm_target = adapter.validate_scope(proposal.target, validated_args, scope)
             tier = adapter.effective_tier(validated_args)
         except (ScopeViolationError, Exception) as exc:
+            self._feedback_history.append(f"Scope/arg block on `{adapter.name}` target `{proposal.target}`: {exc}")
             async with session_scope() as session:
                 session.add(
                     ToolRun(
@@ -236,7 +363,6 @@ class EngagementOrchestrator:
             )
             return False
 
-        from pathlib import Path
         from app.config import get_settings
 
         async with session_scope() as session:
@@ -276,6 +402,9 @@ class EngagementOrchestrator:
                 risk_summary=proposal.risk_summary or f"Tier {tier} active security operation.",
             )
             if decision.status not in ("approved", "modified"):
+                self._feedback_history.append(
+                    f"Operator rejected `{adapter.name}` on `{norm_target}`: {decision.operator_note or decision.status}"
+                )
                 await event_bus.publish(
                     engagement_id=self.engagement_id,
                     event_type="tool_rejected",
@@ -284,7 +413,6 @@ class EngagementOrchestrator:
                 )
                 return False
             effective_args_dict = decision.args
-            # Re-validate modified args & scope!
             validated_args = adapter.validate_args(effective_args_dict)
             norm_target = adapter.validate_scope(norm_target, validated_args, scope)
 
@@ -314,6 +442,7 @@ class EngagementOrchestrator:
                 scope=scope,
             )
         except Exception as exc:
+            self._feedback_history.append(f"Tool `{adapter.name}` raised error on `{norm_target}`: {exc}")
             async with session_scope() as session:
                 r = await session.get(ToolRun, run_id)
                 if r:
@@ -355,6 +484,9 @@ class EngagementOrchestrator:
                 "new_findings": new_findings,
             },
         )
+        if graph is not None:
+            await self._sync_skill_checklist(graph, tool_name=adapter.name, new_findings=new_findings)
+            await self._record_skill_outcome(graph, adapter.name, new_findings)
         if tier == 3:
             await self._update_hypothesis_outcome(norm_target, adapter.name, new_findings)
         return True
@@ -371,10 +503,11 @@ class EngagementOrchestrator:
         scope: ScopePolicy | None = None,
     ) -> PlannerDecision:
         tech_tokens = " ".join(
-            t for a in graph.get("assets", []) for t in (a.get("technologies") or [])
+            str(t) for a in graph.get("assets", []) for t in (a.get("technologies") or [])
         )
         ep_tokens = " ".join(e.get("url", "") for e in graph.get("endpoints", [])[:15])
-        playbooks = knowledge_store.search(f"{objective} {tech_tokens} {ep_tokens}", limit=4)
+        hint_tokens = " ".join(graph.get("operator_hints") or [])
+        playbooks = knowledge_store.search(f"{objective} {tech_tokens} {ep_tokens} {hint_tokens}", limit=5)
 
         distilled_notes = ""
         if len(graph.get("endpoints", [])) > 20 or len(graph.get("recent_runs", [])) > 8:
@@ -386,11 +519,11 @@ class EngagementOrchestrator:
                     messages=[
                         {
                             "role": "system",
-                            "content": "Distill the top 3 untested high-risk endpoints/params from this graph in <=60 words.",
+                            "content": "Distill the top 3 untested high-risk endpoints/params and active attack signals from this graph in <=65 words.",
                         },
-                        {"role": "user", "content": json.dumps(graph)[:4500]},
+                        {"role": "user", "content": json.dumps(graph)[:5000]},
                     ],
-                    max_tokens=160,
+                    max_tokens=180,
                     max_retries=0,
                 )
                 distilled_notes = (distill.content or "").strip()
@@ -403,6 +536,8 @@ class EngagementOrchestrator:
                 "max_steps": max_steps,
                 "objective": objective,
                 "distilled_clues": distilled_notes,
+                "operator_hints": graph.get("operator_hints") or [],
+                "recent_feedback": self._feedback_history[-6:],
                 "available_tools": [
                     {"name": t.name, "tier": t.tier, "description": t.description}
                     for t in tool_registry.list_tools()
@@ -423,20 +558,22 @@ class EngagementOrchestrator:
                     {"role": "user", "content": user_prompt},
                 ],
             )
-            return PlannerDecision.model_validate(raw)
+            decision = PlannerDecision.model_validate(raw)
+            decision.proposed_tools = self._critic_filter_proposals(decision.proposed_tools, graph)
+            return decision
         except Exception as exc:
             await event_bus.publish(
                 engagement_id=self.engagement_id,
                 event_type="planner_fallback",
                 agent_name="planner",
-                message=f"LLM endpoint unavailable or returned non-JSON ({exc}); switching to deterministic OWASP playbook planner.",
+                message=f"LLM endpoint unavailable or returned non-JSON ({exc}); switching to cognitive fallback planner.",
             )
             return self._deterministic_fallback_plan(graph=graph, step=step, scope=scope)
 
     def _derive_nuclei_tags(self, graph: dict[str, Any]) -> list[str]:
         tags = ["misconfig", "exposure"]
         tech_blob = " ".join(
-            t.lower() for a in graph.get("assets", []) for t in (a.get("technologies") or [])
+            str(t).lower() for a in graph.get("assets", []) for t in (a.get("technologies") or [])
         )
         mapping = {
             "wordpress": "wordpress",
@@ -457,8 +594,13 @@ class EngagementOrchestrator:
     def _deterministic_fallback_plan(
         self, *, graph: dict[str, Any], step: int, scope: ScopePolicy | None = None
     ) -> PlannerDecision:
-        """Deterministic OWASP WSTG assessment planner with smart chaining when no LLM server is running."""
-        ran_tools = {(r["tool"], r["target"]) for r in graph.get("recent_runs", [])}
+        """Cognitive skill-driven deterministic planner when no LLM server is running."""
+        ran_tools_modes = {
+            (r["tool"], r["target"], json.dumps((r.get("args") or {}), sort_keys=True))
+            for r in graph.get("recent_runs", [])
+        }
+        ran_pairs = {(r["tool"], r["target"]) for r in graph.get("recent_runs", [])}
+
         seed_urls = []
         for ep in graph.get("endpoints", []):
             u = ep.get("url")
@@ -470,29 +612,90 @@ class EngagementOrchestrator:
 
         proposals: list[ProposedToolCall] = []
         nuclei_tags = self._derive_nuclei_tags(graph)
-        for origin in seed_urls[:2]:
-            if ("ffuf", origin) not in ran_tools:
+        tech_blob = " ".join(
+            str(t).lower() for a in graph.get("assets", []) for t in (a.get("technologies") or [])
+        )
+        ep_urls_lower = [str(ep.get("url") or "").lower() for ep in graph.get("endpoints", [])]
+
+        # 1. WordPress targeted check if detected
+        if ("wordpress" in tech_blob or any("wp-json" in u or "wp-content" in u for u in ep_urls_lower)) and seed_urls:
+            origin = seed_urls[0]
+            if ("wpscan", origin) not in ran_pairs and tool_registry.get("wpscan").is_available()[0]:
                 proposals.append(
                     ProposedToolCall(
-                        tool_name="ffuf",
+                        tool_name="wpscan",
                         target=origin,
-                        args={"wordlist_profile": "builtin", "max_time_seconds": 30},
-                        rationale="Enumerate common API and administrative routes using bounded wordlist.",
-                        risk_summary="Tier 2 rate-limited HTTP GET path probing.",
-                    )
-                )
-            elif ("nuclei", origin) not in ran_tools:
-                proposals.append(
-                    ProposedToolCall(
-                        tool_name="nuclei",
-                        target=origin,
-                        args={"tags": nuclei_tags, "include_intrusive": False},
-                        rationale=f"Run safe Nuclei templates matched to stack ({', '.join(nuclei_tags)}).",
-                        risk_summary="Tier 2 non-intrusive template checks.",
+                        args={"detection_mode": "passive"},
+                        rationale="WordPress stack detected; enumerate plugins, themes, and exposed config.",
+                        risk_summary="Tier 2 passive WordPress fingerprint scan.",
                     )
                 )
 
-        # Chain parameter discovery (arjun) on dynamic endpoints without query params
+        # 2. Skill-specific Tier 2 GraphQL / OAuth deep audits
+        for origin in seed_urls[:2]:
+            if any("graphql" in u for u in ep_urls_lower) and ("http_probe", origin, "graphql_deep_audit") not in {
+                (r[0], r[1], (json.loads(r[2]).get("mode") if r[2] else "")) for r in ran_tools_modes
+            }:
+                if "graphql_deep_audit" not in self._executed_signatures_str():
+                    proposals.append(
+                        ProposedToolCall(
+                            tool_name="http_probe",
+                            target=origin,
+                            args={"mode": "graphql_deep_audit"},
+                            rationale="GraphQL path detected; run schema introspection, field-suggestion oracle, and batching checks.",
+                            risk_summary="Tier 2 GraphQL configuration audit.",
+                        )
+                    )
+                    break
+
+        if not proposals and seed_urls and any(any(tok in u for tok in ("oauth", "openid", "authorize")) for u in ep_urls_lower):
+            origin = seed_urls[0]
+            if f"http_probe|{origin}" not in "|".join(s for s in self._executed_signatures if "oauth_audit" in s):
+                proposals.append(
+                    ProposedToolCall(
+                        tool_name="http_probe",
+                        target=origin,
+                        args={"mode": "oauth_audit"},
+                        rationale="OAuth/OIDC hints detected; verify discovery metadata, PKCE S256, and redirect_uri strictness.",
+                        risk_summary="Tier 2 OAuth/OIDC configuration audit.",
+                    )
+                )
+
+        # 3. Core bounded discovery (ffuf, trufflehog, nuclei)
+        if not proposals:
+            for origin in seed_urls[:2]:
+                if ("ffuf", origin) not in ran_pairs:
+                    proposals.append(
+                        ProposedToolCall(
+                            tool_name="ffuf",
+                            target=origin,
+                            args={"wordlist_profile": "builtin", "max_time_seconds": 30},
+                            rationale="Enumerate common API and administrative routes using bounded wordlist.",
+                            risk_summary="Tier 2 rate-limited HTTP GET path probing.",
+                        )
+                    )
+                elif ("trufflehog", origin) not in ran_pairs and tool_registry.get("trufflehog").is_available()[0]:
+                    proposals.append(
+                        ProposedToolCall(
+                            tool_name="trufflehog",
+                            target=origin,
+                            args={"max_bundles": 6},
+                            rationale="Run TruffleHog secret verification scan over fetched JS/HTML artifacts.",
+                            risk_summary="Tier 1 offline bundle secret check.",
+                        )
+                    )
+                elif ("nuclei", origin) not in ran_pairs:
+                    proposals.append(
+                        ProposedToolCall(
+                            tool_name="nuclei",
+                            target=origin,
+                            args={"tags": nuclei_tags, "include_intrusive": False},
+                            rationale=f"Run safe Nuclei templates matched to stack ({', '.join(nuclei_tags)}).",
+                            risk_summary="Tier 2 non-intrusive template checks.",
+                        )
+                    )
+
+        # 4. Chain parameter discovery (arjun) on dynamic endpoints without query params
         if not proposals:
             for ep in graph.get("endpoints", []):
                 u = ep.get("url") or ""
@@ -501,7 +704,7 @@ class EngagementOrchestrator:
                     u
                     and not (ep.get("query_params") or [])
                     and any(seg in path.lower() for seg in ("/api", "/rest", "/search", "/user", "/login"))
-                    and ("arjun", u) not in ran_tools
+                    and ("arjun", u) not in ran_pairs
                 ):
                     proposals.append(
                         ProposedToolCall(
@@ -514,18 +717,19 @@ class EngagementOrchestrator:
                     )
                     break
 
-        # Propose Tier 3 verification on parameterized endpoints
+        # 5. Tier 3 active verification on query OR body parameterized endpoints + TOCTOU/JWT/BOLA
         if not proposals:
             for ep in graph.get("endpoints", []):
                 q_params = ep.get("query_params") or []
+                b_params = ep.get("body_params") or []
                 u = ep.get("url") or ""
-                if not q_params:
-                    continue
+                path_l = (ep.get("path") or "").lower()
+
                 redir_param = next(
                     (p for p in q_params if p.lower() in {"next", "url", "redirect", "return", "dest", "to", "callback"}),
                     None,
                 )
-                if redir_param and ("http_probe", u) not in ran_tools:
+                if redir_param and f"http_probe|{u}" not in "|".join(s for s in self._executed_signatures if "open_redirect_probe" in s):
                     proposals.append(
                         ProposedToolCall(
                             tool_name="http_probe",
@@ -536,7 +740,7 @@ class EngagementOrchestrator:
                         )
                     )
                     break
-                if q_params and ("dalfox", u) not in ran_tools:
+                if q_params and ("dalfox", u) not in ran_pairs:
                     proposals.append(
                         ProposedToolCall(
                             tool_name="dalfox",
@@ -547,7 +751,7 @@ class EngagementOrchestrator:
                         )
                     )
                     break
-                if q_params and ("sqlmap", u) not in ran_tools:
+                if q_params and ("sqlmap", u) not in ran_pairs:
                     proposals.append(
                         ProposedToolCall(
                             tool_name="sqlmap",
@@ -558,42 +762,81 @@ class EngagementOrchestrator:
                         )
                     )
                     break
+                if b_params and ("sqlmap", u) not in ran_pairs:
+                    sample_json = json.dumps({k: "1" for k in b_params[:4]})
+                    proposals.append(
+                        ProposedToolCall(
+                            tool_name="sqlmap",
+                            target=u,
+                            args={"method": "POST", "data": sample_json, "param": b_params[0], "level": 1, "risk": 1},
+                            rationale=f"Verify SQL injection on POST body parameter '{b_params[0]}'.",
+                            risk_summary="Tier 3 bounded JSON POST SQLi verification.",
+                        )
+                    )
+                    break
+                if any(k in path_l for k in ("coupon", "redeem", "transfer", "withdraw", "vote", "checkout")) and "race_burst_probe" not in self._executed_signatures_str():
+                    proposals.append(
+                        ProposedToolCall(
+                            tool_name="http_probe",
+                            target=u,
+                            args={"mode": "race_burst_probe", "method": "POST", "burst_count": 6},
+                            rationale=f"Check concurrency/idempotency lock hygiene on transactional route `{path_l}`.",
+                            risk_summary="Tier 3 synchronized concurrent POST burst (6 requests).",
+                        )
+                    )
+                    break
 
-        # Propose Tier 3 differential BOLA/auth-boundary replay if engagement has auth headers/cookies & API routes
-        if not proposals and scope and (scope.custom_headers or scope.auth_cookies):
+        # 6. Multi-role BOLA / BFLA / JWT active probes
+        if not proposals and scope and (scope.custom_headers or scope.auth_cookies or scope.has_secondary_auth):
+            has_jwt = "Bearer eyJ" in str(scope.custom_headers) or any("jwt" in (f.get("title") or "").lower() for f in graph.get("findings", []))
             for ep in graph.get("endpoints", []):
                 u = ep.get("url") or ""
                 path = ep.get("path") or ""
-                if ("/api" in path.lower() or "/rest" in path.lower()) and ("http_probe", u) not in ran_tools:
+                if ("/api" in path.lower() or "/rest" in path.lower() or "/users" in path.lower()) and "differential_bola" not in "|".join(
+                    s for s in self._executed_signatures if u in s
+                ):
                     proposals.append(
                         ProposedToolCall(
                             tool_name="http_probe",
                             target=u,
                             args={"mode": "differential_bola", "method": "GET"},
-                            rationale="Verify authentication & object-level authorization boundary via differential replay.",
-                            risk_summary="Tier 3 authenticated vs unauthenticated API comparison.",
+                            rationale="Verify object-level authorization boundary via differential multi-role/unauth replay.",
+                            risk_summary="Tier 3 differential authorization comparison.",
+                        )
+                    )
+                    break
+                if has_jwt and "/api" in path.lower() and "jwt_active_probe" not in self._executed_signatures_str():
+                    proposals.append(
+                        ProposedToolCall(
+                            tool_name="http_probe",
+                            target=u,
+                            args={"mode": "jwt_active_probe", "method": "GET"},
+                            rationale="Verify JWT alg=none and stripped-signature rejection on authenticated API endpoint.",
+                            risk_summary="Tier 3 JWT signature verification hygiene probe.",
                         )
                     )
                     break
 
         if not proposals:
             return PlannerDecision(
-                thought="Deterministic OWASP WSTG recon, safe scan, and verification checks completed.",
+                thought="Cognitive skill checklists, safe scans, and targeted verification checks completed.",
                 phase="complete",
                 proposed_tools=[],
                 should_stop=True,
-                stop_reason="All deterministic playbook phases finished.",
+                stop_reason="All cognitive playbook phases finished.",
             )
 
         return PlannerDecision(
-            thought=f"Deterministic OWASP planner step {step}: executing next playbook stage.",
+            thought=f"Skill-guided deterministic planner step {step}: executing next playbook stage.",
             phase="assessment",
             proposed_tools=proposals[:2],
             should_stop=False,
         )
 
+    def _executed_signatures_str(self) -> str:
+        return "\n".join(self._executed_signatures)
+
     async def _run_fast_triage_summary(self, llm_cfg: LLMProfileConfig) -> None:
-        """Use the fast LLM tier (with deterministic fallback) to summarize assessment posture."""
         async with session_scope() as session:
             graph = await build_graph_context(session, self.engagement_id)
 
@@ -605,7 +848,8 @@ class EngagementOrchestrator:
 
         fallback_msg = (
             f"Triage summary: {len(graph.get('assets', []))} assets, "
-            f"{len(graph.get('endpoints', []))} endpoints, {len(findings)} findings ({counts})."
+            f"{len(graph.get('endpoints', []))} endpoints, {len(findings)} findings ({counts}), "
+            f"{len(graph.get('attack_chains', []))} attack chains."
         )
         try:
             res = await llm_router.complete(
@@ -614,7 +858,7 @@ class EngagementOrchestrator:
                 messages=[
                     {
                         "role": "system",
-                        "content": "Summarize the pentest attack surface and top 2 priorities in 2 concise sentences.",
+                        "content": "Summarize the pentest attack surface, attack chains, and top 2 priorities in 2 concise sentences.",
                     },
                     {
                         "role": "user",
@@ -623,12 +867,13 @@ class EngagementOrchestrator:
                                 "assets": len(graph.get("assets", [])),
                                 "endpoints": len(graph.get("endpoints", [])),
                                 "severity_counts": counts,
+                                "attack_chains": graph.get("attack_chains", [])[:4],
                                 "top_findings": findings[:8],
                             }
                         ),
                     },
                 ],
-                max_tokens=220,
+                max_tokens=240,
             )
             summary_text = (res.content or "").strip() or fallback_msg
         except Exception:
@@ -684,7 +929,7 @@ class EngagementOrchestrator:
                     break
                 recon_steps: list[tuple[str, dict[str, Any], str]] = [
                     ("http_probe", {"mode": "passive_audit"}, "Initial HTTP security header, CORS, cookie, JWT & OpenAPI probe."),
-                    ("js_miner", {"max_bundles": 8}, "Extract hidden API routes and potential credential leaks from JS bundles."),
+                    ("js_miner", {"max_bundles": 8}, "Extract hidden API routes, source maps, DOM sinks, and potential leaks from JS bundles."),
                     ("whatweb", {"aggression": 1}, "Passive web technology stack fingerprinting."),
                     ("wafw00f", {}, "Detect protective WAF/CDN controls."),
                     ("katana", {"depth": 2, "js_crawl": True}, "Crawl HTML & JavaScript routes for endpoints and parameters."),
@@ -710,8 +955,15 @@ class EngagementOrchestrator:
                         agent_name="recon",
                     )
 
-            # Phase 2 & 3: Iterative AI-Planned Assessment & Approval-Gated Verification
+            # Seed initial skill checklist & chains after recon
+            async with session_scope() as session:
+                init_graph = await build_graph_context(session, self.engagement_id)
+                await synthesize_attack_chains(session, self.engagement_id)
+            await self._sync_skill_checklist(init_graph)
+
+            # Phase 2 & 3: Iterative Cognitive Assessment & Approval-Gated Verification
             step = 0
+            no_exec_streak = 0
             while not self._stop_requested and step < eng.max_steps:
                 if not await self._wait_if_paused():
                     break
@@ -721,6 +973,8 @@ class EngagementOrchestrator:
                     if e:
                         e.current_step = step
                     graph = await build_graph_context(session, self.engagement_id)
+
+                await self._sync_skill_checklist(graph)
 
                 decision = await self._plan_next_step(
                     objective=eng.objective,
@@ -747,8 +1001,14 @@ class EngagementOrchestrator:
                     },
                 )
 
-                if decision.should_stop or not decision.proposed_tools:
+                if decision.should_stop:
                     break
+                if not decision.proposed_tools:
+                    no_exec_streak += 1
+                    if no_exec_streak >= 2:
+                        break
+                    self._feedback_history.append("No tools remained after critic filtering; pick different endpoint or mark should_stop=true.")
+                    continue
 
                 executed_any = False
                 for prop in decision.proposed_tools[:3]:
@@ -760,12 +1020,27 @@ class EngagementOrchestrator:
                         autonomy_mode=eng.autonomy_mode,
                         tier2_auto=eng.tier2_auto,
                         agent_name="assessment" if prop.tool_name not in {"sqlmap", "dalfox"} else "verifier",
+                        graph=graph,
                     )
                     executed_any = executed_any or ok
 
                 if not executed_any:
-                    # Avoid spinning if all proposed tools were duplicates, blocked, or rejected
-                    break
+                    no_exec_streak += 1
+                    if no_exec_streak >= 2:
+                        break
+                else:
+                    no_exec_streak = 0
+
+            async with session_scope() as session:
+                new_chains = await synthesize_attack_chains(session, self.engagement_id)
+            if new_chains:
+                await event_bus.publish(
+                    engagement_id=self.engagement_id,
+                    event_type="attack_chain_synthesized",
+                    agent_name="chainer",
+                    message=f"Synthesized {len(new_chains)} correlated multi-step attack chain(s).",
+                    payload={"count": len(new_chains)},
+                )
 
             if not self._stop_requested:
                 await self._run_fast_triage_summary(llm_cfg)

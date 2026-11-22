@@ -8,7 +8,41 @@ export interface ScopePolicy {
   max_concurrency: number;
   custom_headers: Record<string, string>;
   auth_cookies_keys?: string[];
+  secondary_header_keys?: string[];
+  secondary_cookies_keys?: string[];
+  has_secondary_auth?: boolean;
   allow_private_ips: boolean;
+}
+
+export interface AttackChainItem {
+  id: string;
+  title: string;
+  severity: string;
+  risk_summary: string;
+  target_url: string;
+  steps: string[];
+  finding_ids: string[];
+  created_at: string | null;
+}
+
+export interface SkillChecklistEntry {
+  id: string;
+  skill_id: string;
+  skill_title: string;
+  wstg_id: string;
+  item_key: string;
+  item_text: string;
+  status: "pending" | "covered" | "finding" | "skipped";
+  evidence_note: string;
+}
+
+export interface OOBEventItem {
+  id: string;
+  token: string;
+  method: string;
+  path: string;
+  source_ip: string;
+  created_at: string | null;
 }
 
 export interface Engagement {
@@ -95,6 +129,8 @@ export interface FindingItem {
   poc_command: string | null;
   remediation: string;
   tool_source: string;
+  corroborated_by?: string[];
+  verified_at?: string | null;
   created_at: string | null;
 }
 
@@ -153,6 +189,7 @@ export interface RepeaterResponse {
 }
 
 export interface EngagementDetail extends Engagement {
+  operator_hints?: string[];
   assets: AssetItem[];
   endpoints: EndpointItem[];
   tool_runs: ToolRunItem[];
@@ -161,6 +198,9 @@ export interface EngagementDetail extends Engagement {
   events: AgentEventItem[];
   hypotheses: HypothesisItem[];
   snapshots: SnapshotItem[];
+  attack_chains?: AttackChainItem[];
+  checklist_items?: SkillChecklistEntry[];
+  oob_events?: OOBEventItem[];
 }
 
 export interface LLMProfileItem {
@@ -324,14 +364,39 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload),
     }),
-  downloadReport: async (id: string, format: "html" | "markdown" | "sarif") => {
+  reverifyFinding: (findingId: string) =>
+    apiFetch<{ id: string; status: string; still_present: boolean; verified_at: string }>(
+      `/api/v1/findings/${findingId}/reverify`,
+      { method: "POST" }
+    ),
+  steerEngagement: (engagementId: string, hint: string) =>
+    apiFetch<{ engagement_id: string; operator_hints: string[] }>(
+      `/api/v1/engagements/${engagementId}/steer`,
+      {
+        method: "POST",
+        body: JSON.stringify({ hint }),
+      }
+    ),
+  synthesizeChains: (engagementId: string) =>
+    apiFetch<{ engagement_id: string; synthesized: number }>(
+      `/api/v1/engagements/${engagementId}/chains/synthesize`,
+      { method: "POST" }
+    ),
+  downloadReport: async (id: string, format: "html" | "markdown" | "sarif" | "poc_sh") => {
     const token = getStoredToken();
     const resp = await fetch(`/api/v1/engagements/${id}/report?format=${format}`, {
       headers: { Authorization: `Bearer ${token}` },
     });
     if (!resp.ok) throw new Error("Report export failed");
     const blob = await resp.blob();
-    const ext = format === "markdown" ? "md" : format === "sarif" ? "sarif.json" : "html";
+    const ext =
+      format === "markdown"
+        ? "md"
+        : format === "sarif"
+        ? "sarif.json"
+        : format === "poc_sh"
+        ? "poc.sh"
+        : "html";
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;

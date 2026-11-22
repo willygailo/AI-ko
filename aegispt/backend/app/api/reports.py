@@ -9,11 +9,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agents.reporter import (
     render_html_report,
     render_markdown_report,
+    render_poc_script,
     render_sarif_report,
 )
 from app.core.auth import require_api_token
 from app.db.database import get_db
-from app.db.models import Asset, Endpoint, Engagement, Finding, ToolRun
+from app.db.models import Asset, AttackChain, Endpoint, Engagement, Finding, ToolRun
 
 router = APIRouter(
     prefix="/api/v1/engagements",
@@ -25,7 +26,7 @@ router = APIRouter(
 @router.get("/{engagement_id}/report")
 async def export_report(
     engagement_id: str,
-    format: str = Query(default="markdown", pattern="^(markdown|md|html|sarif|json)$"),
+    format: str = Query(default="markdown", pattern="^(markdown|md|html|sarif|json|poc_sh)$"),
     db: AsyncSession = Depends(get_db),
 ):
     eng = await db.get(Engagement, engagement_id)
@@ -35,19 +36,25 @@ async def export_report(
     endpoints = (await db.execute(select(Endpoint).where(Endpoint.engagement_id == engagement_id))).scalars().all()
     findings = (await db.execute(select(Finding).where(Finding.engagement_id == engagement_id))).scalars().all()
     runs = (await db.execute(select(ToolRun).where(ToolRun.engagement_id == engagement_id))).scalars().all()
+    chains = (await db.execute(select(AttackChain).where(AttackChain.engagement_id == engagement_id))).scalars().all()
 
     fmt = format.lower()
     if fmt in ("markdown", "md"):
         return PlainTextResponse(
-            content=render_markdown_report(eng, assets, endpoints, findings, runs),
+            content=render_markdown_report(eng, assets, endpoints, findings, runs, chains),
             media_type="text/markdown; charset=utf-8",
         )
     if fmt == "html":
         return HTMLResponse(
-            content=render_html_report(eng, assets, endpoints, findings, runs),
+            content=render_html_report(eng, assets, endpoints, findings, runs, chains),
         )
     if fmt == "sarif":
         return JSONResponse(content=render_sarif_report(eng, findings))
+    if fmt == "poc_sh":
+        return PlainTextResponse(
+            content=render_poc_script(eng, findings),
+            media_type="text/x-shellscript; charset=utf-8",
+        )
 
     return JSONResponse(
         content={

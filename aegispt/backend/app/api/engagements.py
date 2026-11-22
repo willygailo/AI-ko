@@ -11,8 +11,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents.chainer import synthesize_attack_chains
 from app.agents.orchestrator import orchestrator_manager
-from app.api.schemas import EngagementCreate, ManualToolRunInput, RepeaterRequestInput
+from app.api.schemas import EngagementCreate, ManualToolRunInput, RepeaterRequestInput, SteerInput
 from app.config import get_settings
 from app.core.auth import require_api_token
 from app.core.events import event_bus
@@ -25,12 +26,15 @@ from app.db.models import (
     AgentEvent,
     ApprovalRequest,
     Asset,
+    AttackChain,
     Endpoint,
     Engagement,
     Finding,
     Hypothesis,
+    OOBEvent,
     ScanSnapshot,
     ScopePolicyModel,
+    SkillChecklistItem,
     ToolRun,
 )
 from app.db.persistence import persist_tool_result
@@ -57,10 +61,13 @@ def _serialize_engagement(e: Engagement, scope: ScopePolicyModel | None = None) 
         "max_steps": e.max_steps,
         "current_step": e.current_step,
         "llm_profile_id": e.llm_profile_id,
+        "operator_hints": list(getattr(e, "operator_hints", None) or []),
         "created_at": e.created_at.isoformat() if e.created_at else None,
         "updated_at": e.updated_at.isoformat() if e.updated_at else None,
     }
     if scope is not None:
+        sec_hdrs = getattr(scope, "secondary_headers", None) or {}
+        sec_cks = getattr(scope, "secondary_cookies", None) or {}
         out["scope"] = {
             "allowed_domains": scope.allowed_domains,
             "allowed_urls": scope.allowed_urls,
@@ -72,6 +79,9 @@ def _serialize_engagement(e: Engagement, scope: ScopePolicyModel | None = None) 
             "custom_headers": {k: "***" for k in (scope.custom_headers or {}).keys()},
             "custom_header_keys": sorted((scope.custom_headers or {}).keys()),
             "auth_cookies_keys": sorted((scope.auth_cookies or {}).keys()),
+            "secondary_header_keys": sorted(sec_hdrs.keys()),
+            "secondary_cookies_keys": sorted(sec_cks.keys()),
+            "has_secondary_auth": bool(sec_hdrs or sec_cks),
             "allow_private_ips": scope.allow_private_ips,
         }
     return out
@@ -107,6 +117,8 @@ async def create_engagement(body: EngagementCreate, db: AsyncSession = Depends(g
             max_concurrency=body.scope.max_concurrency,
             custom_headers=body.scope.custom_headers,
             auth_cookies=body.scope.auth_cookies,
+            secondary_headers=body.scope.secondary_headers,
+            secondary_cookies=body.scope.secondary_cookies,
             allow_private_ips=body.scope.allow_private_ips,
         )
     except ScopeViolationError as exc:
@@ -141,6 +153,8 @@ async def create_engagement(body: EngagementCreate, db: AsyncSession = Depends(g
         max_concurrency=body.scope.max_concurrency,
         custom_headers=encrypt_dict(body.scope.custom_headers),
         auth_cookies=encrypt_dict(body.scope.auth_cookies),
+        secondary_headers=encrypt_dict(body.scope.secondary_headers),
+        secondary_cookies=encrypt_dict(body.scope.secondary_cookies),
         allow_private_ips=body.scope.allow_private_ips,
     )
     db.add(scope)
@@ -207,6 +221,28 @@ async def get_engagement(engagement_id: str, db: AsyncSession = Depends(get_db))
             select(ScanSnapshot)
             .where(ScanSnapshot.engagement_id == engagement_id)
             .order_by(ScanSnapshot.created_at.asc())
+        )
+    ).scalars().all()
+    chains = (
+        await db.execute(
+            select(AttackChain)
+            .where(AttackChain.engagement_id == engagement_id)
+            .order_by(AttackChain.created_at.desc())
+        )
+    ).scalars().all()
+    checklist = (
+        await db.execute(
+            select(SkillChecklistItem)
+            .where(SkillChecklistItem.engagement_id == engagement_id)
+            .order_by(SkillChecklistItem.skill_id, SkillChecklistItem.item_key)
+        )
+    ).scalars().all()
+    oob_rows = (
+        await db.execute(
+            select(OOBEvent)
+            .where(OOBEvent.engagement_id == engagement_id)
+            .order_by(OOBEvent.created_at.desc())
+            .limit(50)
         )
     ).scalars().all()
 
@@ -290,6 +326,8 @@ async def get_engagement(engagement_id: str, db: AsyncSession = Depends(get_db))
                 "poc_command": f.poc_command,
                 "remediation": f.remediation,
                 "tool_source": f.tool_source,
+                "corroborated_by": f.corroborated_by or [f.tool_source],
+                "verified_at": f.verified_at.isoformat() if getattr(f, "verified_at", None) else None,
                 "created_at": f.created_at.isoformat() if f.created_at else None,
             }
             for f in findings
@@ -330,6 +368,43 @@ async def get_engagement(engagement_id: str, db: AsyncSession = Depends(get_db))
                 "created_at": s.created_at.isoformat() if s.created_at else None,
             }
             for s in snapshots
+        ],
+        "attack_chains": [
+            {
+                "id": c.id,
+                "title": c.title,
+                "severity": c.severity,
+                "risk_summary": c.risk_summary,
+                "target_url": c.target_url,
+                "steps": c.steps or [],
+                "finding_ids": c.finding_ids or [],
+                "created_at": c.created_at.isoformat() if c.created_at else None,
+            }
+            for c in chains
+        ],
+        "checklist_items": [
+            {
+                "id": item.id,
+                "skill_id": item.skill_id,
+                "skill_title": item.skill_title,
+                "wstg_id": item.wstg_id,
+                "item_key": item.item_key,
+                "item_text": item.item_text,
+                "status": item.status,
+                "evidence_note": item.evidence_note,
+            }
+            for item in checklist
+        ],
+        "oob_events": [
+            {
+                "id": o.id,
+                "token": o.token,
+                "method": o.method,
+                "path": o.path,
+                "source_ip": o.source_ip,
+                "created_at": o.created_at.isoformat() if o.created_at else None,
+            }
+            for o in oob_rows
         ],
     }
 
@@ -612,4 +687,53 @@ async def run_repeater(
         "headers": dict(resp.headers),
         "body": resp.text[:50000],
         "curl_command": " ".join(curl_parts),
+    }
+
+
+@router.post("/{engagement_id}/steer")
+async def steer_engagement(
+    engagement_id: str,
+    body: SteerInput,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, object]:
+    eng = await db.get(Engagement, engagement_id)
+    if not eng:
+        raise HTTPException(status_code=404, detail="Engagement not found.")
+    hints = list(eng.operator_hints or [])
+    hints.append(body.hint.strip())
+    eng.operator_hints = hints[-15:]
+    await db.commit()
+    await event_bus.publish(
+        engagement_id=engagement_id,
+        event_type="operator_steer",
+        agent_name="operator",
+        message=f"Operator steering hint queued: {body.hint.strip()}",
+        payload={"hint": body.hint.strip()},
+    )
+    return {"engagement_id": engagement_id, "operator_hints": eng.operator_hints}
+
+
+@router.post("/{engagement_id}/chains/synthesize")
+async def trigger_chain_synthesis(
+    engagement_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, object]:
+    eng = await db.get(Engagement, engagement_id)
+    if not eng:
+        raise HTTPException(status_code=404, detail="Engagement not found.")
+    created = await synthesize_attack_chains(db, engagement_id)
+    await db.commit()
+    return {
+        "engagement_id": engagement_id,
+        "synthesized": len(created),
+        "chains": [
+            {
+                "id": c.id,
+                "title": c.title,
+                "severity": c.severity,
+                "risk_summary": c.risk_summary,
+                "steps": c.steps,
+            }
+            for c in created
+        ],
     }
