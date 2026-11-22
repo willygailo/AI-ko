@@ -46,7 +46,9 @@ def token() -> None:
 
 
 @app.command()
-def doctor() -> None:
+def doctor(
+    json_output: bool = typer.Option(False, "--json", help="Print raw JSON output"),
+) -> None:
     """Verify installed Kali tools, OWASP playbooks, and LLM endpoint reachability."""
     client = AegisClient()
     try:
@@ -67,6 +69,10 @@ def doctor() -> None:
             "llm": llm_status,
             "knowledge_playbooks": len(knowledge_store.search("", limit=20)),
         }
+
+    if json_output:
+        console.print_json(json.dumps(data))
+        return
 
     table = Table(title=f"Kali Tool Adapters ({data['tools_available']}/{data['tools_total']} ready)")
     table.add_column("Tool", style="cyan")
@@ -149,6 +155,47 @@ def create_engagement(
             border_style="green",
         )
     )
+
+
+@engagement_app.command("delete")
+def delete_engagement(engagement_id: str = typer.Argument(..., help="Engagement ID to delete")) -> None:
+    """Delete an engagement and its stored artifacts."""
+    client = AegisClient()
+    client.delete(f"/api/v1/engagements/{engagement_id}")
+    console.print(f"[green]Deleted engagement {engagement_id}.[/green]")
+
+
+@app.command()
+def runs(
+    engagement_id: str = typer.Argument(..., help="Engagement ID"),
+    log: Optional[str] = typer.Option(None, "--log", help="Print raw stdout/stderr log for a specific run_id"),
+) -> None:
+    """Inspect tool execution runs or read a run's raw stdout/stderr log."""
+    client = AegisClient()
+    if log:
+        log_text = client.get(f"/api/v1/engagements/{engagement_id}/runs/{log}/log").json().get("log", "")
+        console.print(Panel(log_text or "(empty log)", title=f"Tool Run Log: {log}", border_style="cyan"))
+        return
+
+    detail = client.get(f"/api/v1/engagements/{engagement_id}").json()
+    tool_runs = detail.get("tool_runs") or []
+    table = Table(title=f"Tool Runs for {engagement_id} ({len(tool_runs)})")
+    table.add_column("Run ID", style="cyan")
+    table.add_column("Tool")
+    table.add_column("Tier", justify="center")
+    table.add_column("Status")
+    table.add_column("Duration")
+    table.add_column("Target")
+    for r in tool_runs:
+        table.add_row(
+            r["id"],
+            r["tool_name"],
+            f"T{r['tier']}",
+            r["status"],
+            f"{r['duration_ms']}ms" if r.get("duration_ms") is not None else "-",
+            r["target"],
+        )
+    console.print(table)
 
 
 async def _stream_and_approve(client: AegisClient, engagement_id: str) -> None:

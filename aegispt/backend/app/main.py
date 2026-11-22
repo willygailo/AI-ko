@@ -8,13 +8,33 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from app.api import approvals, engagements, findings, models_api, reports, system, ws
 from app.config import get_settings
 from app.db.database import close_db, init_db, session_scope
-from app.db.models import LLMProfile
+from app.db.models import ApprovalRequest, Engagement, LLMProfile, ToolRun
 from app.knowledge.store import knowledge_store
+
+
+async def _recover_interrupted_runs() -> None:
+    """Cleanly transition orphaned running/awaiting states left by a prior process exit."""
+    async with session_scope() as session:
+        await session.execute(
+            update(Engagement)
+            .where(Engagement.status.in_(["running", "awaiting_approval"]))
+            .values(status="paused")
+        )
+        await session.execute(
+            update(ToolRun)
+            .where(ToolRun.status.in_(["running", "awaiting_approval"]))
+            .values(status="failed", error_message="Interrupted by server restart.")
+        )
+        await session.execute(
+            update(ApprovalRequest)
+            .where(ApprovalRequest.status == "pending")
+            .values(status="expired", operator_note="Expired due to server restart.")
+        )
 
 
 async def _seed_default_llm_profile() -> None:
@@ -41,6 +61,7 @@ async def lifespan(_app: FastAPI):
     settings = get_settings()
     token = settings.get_or_create_api_token()
     await init_db()
+    await _recover_interrupted_runs()
     knowledge_store.ensure_indexed()
     await _seed_default_llm_profile()
     print(f"[AegisPT] Listening on http://{settings.host}:{settings.port}")

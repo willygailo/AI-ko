@@ -1,6 +1,7 @@
 """Native async HTTP/API Probe & Passive Security Analyzer (headers, TLS, CORS, cookies, OpenAPI/GraphQL)."""
 from __future__ import annotations
 
+import base64
 import json
 import re
 from pathlib import Path
@@ -38,6 +39,91 @@ API_SCHEMA_PATHS = [
     "/robots.txt",
     "/.well-known/security.txt",
 ]
+
+
+JWT_RE = re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*")
+SENSITIVE_JWT_CLAIMS = {"password", "passwd", "secret", "ssn", "private_key", "credit_card", "pin"}
+
+
+def _decode_jwt_part(part: str) -> dict[str, Any] | None:
+    try:
+        padded = part + "=" * (-len(part) % 4)
+        raw = base64.urlsafe_b64decode(padded.encode("ascii"))
+        obj = json.loads(raw.decode("utf-8", errors="replace"))
+        return obj if isinstance(obj, dict) else None
+    except Exception:
+        return None
+
+
+def audit_jwt_candidates(tokens: list[str], target_url: str, tool_source: str) -> list[DiscoveredFinding]:
+    """Passively inspect JWT headers/claims for alg=none, missing exp, and sensitive claim keys."""
+    findings: list[DiscoveredFinding] = []
+    seen_issues: set[str] = set()
+
+    for raw_tok in tokens:
+        for m in JWT_RE.finditer(raw_tok or ""):
+            parts = m.group(0).split(".")
+            if len(parts) != 3:
+                continue
+            header = _decode_jwt_part(parts[0])
+            payload = _decode_jwt_part(parts[1])
+            if not header or not payload:
+                continue
+
+            alg = str(header.get("alg") or "").lower()
+            if alg == "none" and "alg_none" not in seen_issues:
+                seen_issues.add("alg_none")
+                findings.append(
+                    DiscoveredFinding(
+                        title="Insecure JWT Algorithm ('alg: none')",
+                        severity="high",
+                        target_url=target_url,
+                        cwe_id="CWE-347",
+                        owasp_category="API2:2023 - Broken Authentication",
+                        cvss_score=7.5,
+                        description="Observed a JSON Web Token specifying alg='none', indicating unsigned token usage.",
+                        evidence={"header": header, "claim_keys": sorted(payload.keys())},
+                        remediation="Enforce strict asymmetric/HMAC JWT signature verification and reject 'none' or unexpected algorithms.",
+                        tool_source=tool_source,
+                    )
+                )
+
+            if "exp" not in payload and "missing_exp" not in seen_issues:
+                seen_issues.add("missing_exp")
+                findings.append(
+                    DiscoveredFinding(
+                        title="JWT Missing Expiration Claim ('exp')",
+                        severity="low",
+                        target_url=target_url,
+                        cwe_id="CWE-613",
+                        owasp_category="API2:2023 - Broken Authentication",
+                        cvss_score=3.5,
+                        description="Observed a JWT without an 'exp' expiration claim, allowing indefinite token replay if leaked.",
+                        evidence={"header_alg": header.get("alg"), "claim_keys": sorted(payload.keys())},
+                        remediation="Include short-lived 'exp' timestamps on all issued JWTs and enforce expiration server-side.",
+                        tool_source=tool_source,
+                    )
+                )
+
+            sensitive_keys = sorted(k for k in payload.keys() if k.lower() in SENSITIVE_JWT_CLAIMS)
+            if sensitive_keys and "sensitive_claims" not in seen_issues:
+                seen_issues.add("sensitive_claims")
+                findings.append(
+                    DiscoveredFinding(
+                        title="Sensitive Claim Names Inside JWT Payload",
+                        severity="medium",
+                        target_url=target_url,
+                        cwe_id="CWE-200",
+                        owasp_category="API2:2023 - Broken Authentication",
+                        cvss_score=5.3,
+                        description=f"JWT payload contains sensitive fields ({', '.join(sensitive_keys)}), which are readable via base64 decoding.",
+                        evidence={"sensitive_claim_keys": sensitive_keys},
+                        remediation="Store only opaque identifiers/scopes in JWT payloads; never place passwords or secrets in JWT claims.",
+                        tool_source=tool_source,
+                    )
+                )
+
+    return findings
 
 
 class HttpProbeArgs(BaseModel):
@@ -226,6 +312,15 @@ class HttpProbeAdapter(BaseToolAdapter):
                             )
                         )
 
+                # Passive JWT audit across headers/cookies
+                jwt_sources = (
+                    list(merged_headers.values())
+                    + list(cookies.values())
+                    + resp.headers.get_list("set-cookie")
+                    + [resp.headers.get("authorization", "")]
+                )
+                findings.extend(audit_jwt_candidates(jwt_sources, final_url, self.name))
+
                 # CORS check with benign Origin header
                 if args.check_cors:
                     cors_resp = await client.get(
@@ -307,7 +402,7 @@ class HttpProbeAdapter(BaseToolAdapter):
                                         tool_source=self.name,
                                     )
                                 )
-                        elif path == "/graphql" and r.status_code == 200:
+                        elif path == "/graphql" and r.status_code in (200, 400):
                             endpoints.append(
                                 DiscoveredEndpoint(
                                     method="POST",
@@ -317,6 +412,31 @@ class HttpProbeAdapter(BaseToolAdapter):
                                     source=self.name,
                                 )
                             )
+                            # Safe non-mutating GraphQL introspection probe
+                            try:
+                                gql_r = await client.post(
+                                    candidate,
+                                    headers={**merged_headers, "Content-Type": "application/json"},
+                                    json={"query": "{__schema{queryType{name}}}"},
+                                )
+                                if gql_r.status_code == 200 and "__schema" in gql_r.text:
+                                    findings.append(
+                                        DiscoveredFinding(
+                                            title="Unauthenticated GraphQL Introspection Enabled",
+                                            severity="medium",
+                                            target_url=candidate,
+                                            cwe_id="CWE-200",
+                                            owasp_category="API8:2023 - Security Misconfiguration",
+                                            cvss_score=5.3,
+                                            description="GraphQL endpoint responds to __schema introspection queries without authentication, exposing full API types and mutations.",
+                                            evidence={"url": candidate, "response_preview": gql_r.text[:400]},
+                                            poc_command=f"curl -s -X POST -H 'Content-Type: application/json' -d '{{\"query\":\"{{__schema{{queryType{{name}}}}}}\"}}' '{candidate}'",
+                                            remediation="Disable GraphQL introspection in production environments and require authentication on schema queries.",
+                                            tool_source=self.name,
+                                        )
+                                    )
+                            except Exception:
+                                pass
                         elif r.status_code == 200 and path == "/robots.txt":
                             for line in r.text.splitlines():
                                 line = line.strip()

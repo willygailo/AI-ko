@@ -7,6 +7,7 @@ export interface ScopePolicy {
   max_rps: number;
   max_concurrency: number;
   custom_headers: Record<string, string>;
+  auth_cookies_keys?: string[];
   allow_private_ips: boolean;
 }
 
@@ -202,6 +203,8 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload),
     }),
+  getRunLog: (id: string, runId: string) =>
+    apiFetch<{ log: string }>(`/api/v1/engagements/${id}/runs/${runId}/log`),
   decideApproval: (
     approvalId: string,
     payload: { decision: "approved" | "modified" | "rejected"; modified_args?: Record<string, unknown>; operator_note?: string }

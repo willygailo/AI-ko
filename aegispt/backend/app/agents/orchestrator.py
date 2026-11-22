@@ -15,18 +15,16 @@ from app.core.policy import approval_coordinator
 from app.core.scope import ScopePolicy, ScopeViolationError
 from app.db.database import session_scope
 from app.db.models import (
-    Asset,
-    Endpoint,
     Engagement,
-    Finding,
     LLMProfile,
     ScopePolicyModel,
     ToolRun,
 )
+from app.db.persistence import persist_tool_result
 from app.knowledge.store import knowledge_store
 from app.llm.router import LLMProfileConfig, default_profile_from_settings, llm_router
 from app.llm.schemas import PlannerDecision, ProposedToolCall
-from app.tools.base import ToolResult, fingerprint_finding
+from app.tools.base import ToolResult
 from app.tools.registry import tool_registry
 
 
@@ -109,114 +107,8 @@ class EngagementOrchestrator:
             return eng, scope, llm_cfg
 
     async def _persist_tool_result(self, result: ToolResult) -> int:
-        new_findings = 0
         async with session_scope() as session:
-            for a in result.assets:
-                existing = (
-                    await session.execute(
-                        select(Asset).where(
-                            Asset.engagement_id == self.engagement_id,
-                            Asset.asset_type == a.asset_type,
-                            Asset.value == a.value,
-                        )
-                    )
-                ).scalar_one_or_none()
-                if existing:
-                    if a.status_code is not None:
-                        existing.status_code = a.status_code
-                    if a.title:
-                        existing.title = a.title
-                    if a.waf:
-                        existing.waf = a.waf
-                    if a.ip_address:
-                        existing.ip_address = a.ip_address
-                    merged_tech = sorted(set(existing.technologies or []) | set(a.technologies or []))
-                    existing.technologies = merged_tech
-                    if a.headers:
-                        existing.headers = {**(existing.headers or {}), **a.headers}
-                else:
-                    session.add(
-                        Asset(
-                            engagement_id=self.engagement_id,
-                            asset_type=a.asset_type,
-                            value=a.value,
-                            ip_address=a.ip_address,
-                            status_code=a.status_code,
-                            title=a.title,
-                            waf=a.waf,
-                            technologies=a.technologies,
-                            headers=a.headers,
-                            discovered_by=a.discovered_by,
-                        )
-                    )
-
-            for ep in result.endpoints:
-                existing_ep = (
-                    await session.execute(
-                        select(Endpoint).where(
-                            Endpoint.engagement_id == self.engagement_id,
-                            Endpoint.method == ep.method,
-                            Endpoint.url == ep.url,
-                        )
-                    )
-                ).scalar_one_or_none()
-                if existing_ep:
-                    existing_ep.query_params = sorted(
-                        set(existing_ep.query_params or []) | set(ep.query_params or [])
-                    )
-                    existing_ep.body_params = sorted(
-                        set(existing_ep.body_params or []) | set(ep.body_params or [])
-                    )
-                    if ep.status_code is not None:
-                        existing_ep.status_code = ep.status_code
-                else:
-                    session.add(
-                        Endpoint(
-                            engagement_id=self.engagement_id,
-                            method=ep.method,
-                            url=ep.url,
-                            path=ep.path,
-                            query_params=ep.query_params,
-                            body_params=ep.body_params,
-                            status_code=ep.status_code,
-                            content_type=ep.content_type,
-                            source=ep.source,
-                        )
-                    )
-
-            for f in result.findings:
-                fp = fingerprint_finding(f.tool_source, f.title, f.target_url, f.parameter)
-                existing_f = (
-                    await session.execute(
-                        select(Finding).where(
-                            Finding.engagement_id == self.engagement_id,
-                            Finding.fingerprint == fp,
-                        )
-                    )
-                ).scalar_one_or_none()
-                if not existing_f:
-                    session.add(
-                        Finding(
-                            engagement_id=self.engagement_id,
-                            title=f.title,
-                            severity=f.severity,
-                            status="open",
-                            cvss_score=f.cvss_score,
-                            cvss_vector=f.cvss_vector,
-                            cwe_id=f.cwe_id,
-                            owasp_category=f.owasp_category,
-                            target_url=f.target_url,
-                            parameter=f.parameter,
-                            description=f.description,
-                            evidence=f.evidence,
-                            poc_command=f.poc_command,
-                            remediation=f.remediation,
-                            tool_source=f.tool_source,
-                            fingerprint=fp,
-                        )
-                    )
-                    new_findings += 1
-        return new_findings
+            return await persist_tool_result(session, self.engagement_id, result)
 
     async def _dispatch_tool(
         self,
@@ -411,6 +303,7 @@ class EngagementOrchestrator:
         llm_cfg: LLMProfileConfig,
         step: int,
         max_steps: int,
+        scope: ScopePolicy | None = None,
     ) -> PlannerDecision:
         tech_tokens = " ".join(
             t for a in graph.get("assets", []) for t in (a.get("technologies") or [])
@@ -450,12 +343,33 @@ class EngagementOrchestrator:
                 agent_name="planner",
                 message=f"LLM endpoint unavailable or returned non-JSON ({exc}); switching to deterministic OWASP playbook planner.",
             )
-            return self._deterministic_fallback_plan(graph=graph, step=step)
+            return self._deterministic_fallback_plan(graph=graph, step=step, scope=scope)
+
+    def _derive_nuclei_tags(self, graph: dict[str, Any]) -> list[str]:
+        tags = ["misconfig", "exposure"]
+        tech_blob = " ".join(
+            t.lower() for a in graph.get("assets", []) for t in (a.get("technologies") or [])
+        )
+        mapping = {
+            "wordpress": "wordpress",
+            "express": "nodejs",
+            "node": "nodejs",
+            "nginx": "nginx",
+            "apache": "apache",
+            "spring": "springboot",
+            "django": "django",
+            "php": "php",
+            "graphql": "graphql",
+        }
+        for needle, tag in mapping.items():
+            if needle in tech_blob and tag not in tags:
+                tags.append(tag)
+        return tags[:5]
 
     def _deterministic_fallback_plan(
-        self, *, graph: dict[str, Any], step: int
+        self, *, graph: dict[str, Any], step: int, scope: ScopePolicy | None = None
     ) -> PlannerDecision:
-        """Deterministic OWASP WSTG assessment planner used when no LLM server is running."""
+        """Deterministic OWASP WSTG assessment planner with smart chaining when no LLM server is running."""
         ran_tools = {(r["tool"], r["target"]) for r in graph.get("recent_runs", [])}
         seed_urls = []
         for ep in graph.get("endpoints", []):
@@ -467,6 +381,7 @@ class EngagementOrchestrator:
                     seed_urls.append(origin)
 
         proposals: list[ProposedToolCall] = []
+        nuclei_tags = self._derive_nuclei_tags(graph)
         for origin in seed_urls[:2]:
             if ("ffuf", origin) not in ran_tools:
                 proposals.append(
@@ -483,13 +398,35 @@ class EngagementOrchestrator:
                     ProposedToolCall(
                         tool_name="nuclei",
                         target=origin,
-                        args={"tags": ["misconfig", "exposure"], "include_intrusive": False},
-                        rationale="Run safe Nuclei misconfiguration and exposure templates.",
+                        args={"tags": nuclei_tags, "include_intrusive": False},
+                        rationale=f"Run safe Nuclei templates matched to stack ({', '.join(nuclei_tags)}).",
                         risk_summary="Tier 2 non-intrusive template checks.",
                     )
                 )
 
-        # Look for parameterized endpoints to propose Tier 3 verification
+        # Chain parameter discovery (arjun) on dynamic endpoints without query params
+        if not proposals:
+            for ep in graph.get("endpoints", []):
+                u = ep.get("url") or ""
+                path = ep.get("path") or "/"
+                if (
+                    u
+                    and not (ep.get("query_params") or [])
+                    and any(seg in path.lower() for seg in ("/api", "/rest", "/search", "/user", "/login"))
+                    and ("arjun", u) not in ran_tools
+                ):
+                    proposals.append(
+                        ProposedToolCall(
+                            tool_name="arjun",
+                            target=u,
+                            args={"method": "GET"},
+                            rationale=f"Discover hidden query parameters on `{path}` before injection checks.",
+                            risk_summary="Tier 2 bounded parameter mining.",
+                        )
+                    )
+                    break
+
+        # Propose Tier 3 verification on parameterized endpoints
         if not proposals:
             for ep in graph.get("endpoints", []):
                 q_params = ep.get("query_params") or []
@@ -517,6 +454,23 @@ class EngagementOrchestrator:
                     )
                     break
 
+        # Propose Tier 3 auth-boundary replay if engagement has auth headers/cookies & API routes
+        if not proposals and scope and (scope.custom_headers or scope.auth_cookies):
+            for ep in graph.get("endpoints", []):
+                u = ep.get("url") or ""
+                path = ep.get("path") or ""
+                if ("/api" in path.lower() or "/rest" in path.lower()) and ("http_probe", u) not in ran_tools:
+                    proposals.append(
+                        ProposedToolCall(
+                            tool_name="http_probe",
+                            target=u,
+                            args={"mode": "replay_request", "method": "GET"},
+                            rationale="Verify authorization enforcement on discovered API endpoint.",
+                            risk_summary="Tier 3 authenticated/differential API replay.",
+                        )
+                    )
+                    break
+
         if not proposals:
             return PlannerDecision(
                 thought="Deterministic OWASP WSTG recon, safe scan, and verification checks completed.",
@@ -531,6 +485,56 @@ class EngagementOrchestrator:
             phase="assessment",
             proposed_tools=proposals[:2],
             should_stop=False,
+        )
+
+    async def _run_fast_triage_summary(self, llm_cfg: LLMProfileConfig) -> None:
+        """Use the fast LLM tier (with deterministic fallback) to summarize assessment posture."""
+        async with session_scope() as session:
+            graph = await build_graph_context(session, self.engagement_id)
+
+        findings = graph.get("findings") or []
+        counts: dict[str, int] = {}
+        for f in findings:
+            sev = str(f.get("severity") or "info")
+            counts[sev] = counts.get(sev, 0) + 1
+
+        fallback_msg = (
+            f"Triage summary: {len(graph.get('assets', []))} assets, "
+            f"{len(graph.get('endpoints', []))} endpoints, {len(findings)} findings ({counts})."
+        )
+        try:
+            res = await llm_router.complete(
+                profile=llm_cfg,
+                tier="fast",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "Summarize the pentest attack surface and top 2 priorities in 2 concise sentences.",
+                    },
+                    {
+                        "role": "user",
+                        "content": json.dumps(
+                            {
+                                "assets": len(graph.get("assets", [])),
+                                "endpoints": len(graph.get("endpoints", [])),
+                                "severity_counts": counts,
+                                "top_findings": findings[:8],
+                            }
+                        ),
+                    },
+                ],
+                max_tokens=220,
+            )
+            summary_text = (res.content or "").strip() or fallback_msg
+        except Exception:
+            summary_text = fallback_msg
+
+        await event_bus.publish(
+            engagement_id=self.engagement_id,
+            event_type="executive_summary",
+            agent_name="triage",
+            message=summary_text[:800],
+            payload={"severity_counts": counts},
         )
 
     async def run(self) -> None:
@@ -571,12 +575,18 @@ class EngagementOrchestrator:
             for seed_url in scope.primary_seed_urls()[:3]:
                 if self._stop_requested:
                     break
-                for tool_name, t_args, rat in [
-                    ("http_probe", {"mode": "passive_audit"}, "Initial HTTP security header, CORS, cookie & OpenAPI probe."),
+                recon_steps: list[tuple[str, dict[str, Any], str]] = [
+                    ("http_probe", {"mode": "passive_audit"}, "Initial HTTP security header, CORS, cookie, JWT & OpenAPI probe."),
                     ("whatweb", {"aggression": 1}, "Passive web technology stack fingerprinting."),
                     ("wafw00f", {}, "Detect protective WAF/CDN controls."),
                     ("katana", {"depth": 2, "js_crawl": True}, "Crawl HTML & JavaScript routes for endpoints and parameters."),
-                ]:
+                ]
+                if seed_url.lower().startswith("https://"):
+                    recon_steps.insert(
+                        1,
+                        ("sslscan", {}, "Audit TLS protocols, cipher suites, and certificate validity."),
+                    )
+                for tool_name, t_args, rat in recon_steps:
                     if self._stop_requested:
                         break
                     await self._dispatch_tool(
@@ -610,6 +620,7 @@ class EngagementOrchestrator:
                     llm_cfg=llm_cfg,
                     step=step,
                     max_steps=eng.max_steps,
+                    scope=scope,
                 )
 
                 await event_bus.publish(
@@ -644,6 +655,9 @@ class EngagementOrchestrator:
                 if not executed_any:
                     # Avoid spinning if all proposed tools were duplicates, blocked, or rejected
                     break
+
+            if not self._stop_requested:
+                await self._run_fast_triage_summary(llm_cfg)
 
             final_status = "stopped" if self._stop_requested else "completed"
             async with session_scope() as session:

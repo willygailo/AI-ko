@@ -1,15 +1,20 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
+  FileText,
   KeyRound,
   Pause,
   Play,
   Plus,
+  Search,
+  Send,
   Settings,
   ShieldAlert,
   ShieldCheck,
   Square,
   Terminal,
+  Trash2,
+  X,
 } from "lucide-react";
 import {
   AgentEventItem,
@@ -17,6 +22,7 @@ import {
   Engagement,
   EngagementDetail,
   LLMProfileItem,
+  ToolRunItem,
   api,
   createEngagementWebSocket,
   getStoredToken,
@@ -33,11 +39,13 @@ const EVENT_COLORS: Record<string, string> = {
   agent_thought: "text-fuchsia-300",
   tool_started: "text-cyan-400",
   tool_completed: "text-emerald-300",
+  manual_tool_completed: "text-emerald-300",
   tool_output: "text-slate-500",
   scope_blocked: "text-red-400",
   approval_required: "text-amber-300",
   approval_resolved: "text-sky-300",
   planner_fallback: "text-amber-400",
+  executive_summary: "text-cyan-200 font-semibold",
   engagement_finished: "text-emerald-400 font-bold",
   engagement_failed: "text-red-400 font-bold",
 };
@@ -56,10 +64,14 @@ export default function App() {
   const [showWizard, setShowWizard] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [activeApproval, setActiveApproval] = useState<ApprovalItem | null>(null);
-  const [activeTab, setActiveTab] = useState<"graph" | "findings" | "runs">("graph");
+  const [activeTab, setActiveTab] = useState<"graph" | "endpoints" | "findings" | "runs" | "approvals">("graph");
+
+  const [endpointSearch, setEndpointSearch] = useState("");
+  const [selectedRunLog, setSelectedRunLog] = useState<{ run: ToolRunItem; log: string } | null>(null);
 
   const [manualTool, setManualTool] = useState("http_probe");
   const [manualTarget, setManualTarget] = useState("");
+  const [manualArgsJson, setManualArgsJson] = useState("");
   const [manualError, setManualError] = useState("");
   const [manualBusy, setManualBusy] = useState(false);
 
@@ -69,7 +81,10 @@ export default function App() {
   const refreshList = useCallback(async () => {
     const res = await api.listEngagements();
     setEngagements(res.engagements);
-    if (!selectedId && res.engagements.length > 0) {
+    if (res.engagements.length === 0) {
+      setSelectedId("");
+      setDetail(null);
+    } else if (!selectedId || !res.engagements.some((e) => e.id === selectedId)) {
       setSelectedId(res.engagements[0].id);
     }
   }, [selectedId]);
@@ -79,7 +94,9 @@ export default function App() {
     const d = await api.getEngagement(id);
     setDetail(d);
     setEvents(d.events || []);
-    const seed = d.scope?.allowed_urls?.[0] || (d.scope?.allowed_domains?.[0] ? `https://${d.scope.allowed_domains[0]}` : "");
+    const seed =
+      d.scope?.allowed_urls?.[0] ||
+      (d.scope?.allowed_domains?.[0] ? `https://${d.scope.allowed_domains[0]}` : "");
     if (seed) setManualTarget((prev) => prev || seed);
   }, []);
 
@@ -108,9 +125,16 @@ export default function App() {
     const ws = createEngagementWebSocket(selectedId, (ev) => {
       setEvents((prev) => [...prev.slice(-240), ev]);
       if (
-        ["tool_completed", "approval_required", "approval_resolved", "engagement_finished", "engagement_failed", "scope_blocked"].includes(
-          ev.event_type
-        )
+        [
+          "tool_completed",
+          "manual_tool_completed",
+          "approval_required",
+          "approval_resolved",
+          "executive_summary",
+          "engagement_finished",
+          "engagement_failed",
+          "scope_blocked",
+        ].includes(ev.event_type)
       ) {
         refreshDetail(selectedId).catch(() => {});
       }
@@ -128,6 +152,24 @@ export default function App() {
     [detail]
   );
 
+  // Auto-surface first pending approval if user has none open
+  useEffect(() => {
+    if (!activeApproval && pendingApprovals.length > 0) {
+      setActiveApproval(pendingApprovals[0]);
+    }
+  }, [pendingApprovals, activeApproval]);
+
+  const filteredEndpoints = useMemo(() => {
+    const q = endpointSearch.trim().toLowerCase();
+    return (detail?.endpoints || []).filter(
+      (ep) =>
+        !q ||
+        ep.url.toLowerCase().includes(q) ||
+        ep.method.toLowerCase().includes(q) ||
+        ep.query_params.some((p) => p.toLowerCase().includes(q))
+    );
+  }, [detail?.endpoints, endpointSearch]);
+
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setAuthError("");
@@ -136,7 +178,7 @@ export default function App() {
       await api.listEngagements();
       setAuthenticated(true);
     } catch {
-      setAuthError("Token rejected by AegisPT server. Run `aegispt token` in terminal to get the local token.");
+      setAuthError("Token rejected by AegisPT server. Run `./aegispt token` in terminal to get the local token.");
     }
   };
 
@@ -144,12 +186,21 @@ export default function App() {
     e.preventDefault();
     if (!selectedId || !manualTarget) return;
     setManualError("");
+    let parsedArgs: Record<string, unknown> = {};
+    if (manualArgsJson.trim()) {
+      try {
+        parsedArgs = JSON.parse(manualArgsJson);
+      } catch {
+        setManualError("Invalid JSON in optional args field.");
+        return;
+      }
+    }
     setManualBusy(true);
     try {
       await api.runManualTool(selectedId, {
         tool_name: manualTool,
         target: manualTarget,
-        args: {},
+        args: parsedArgs,
       });
       await refreshDetail(selectedId);
     } catch (err) {
@@ -157,6 +208,23 @@ export default function App() {
     } finally {
       setManualBusy(false);
     }
+  };
+
+  const handleOpenRunLog = async (run: ToolRunItem) => {
+    if (!selectedId) return;
+    try {
+      const res = await api.getRunLog(selectedId, run.id);
+      setSelectedRunLog({ run, log: res.log || "(no log output recorded)" });
+    } catch (err) {
+      setSelectedRunLog({ run, log: `Failed to load log: ${String(err)}` });
+    }
+  };
+
+  const handleDeleteEngagement = async () => {
+    if (!detail) return;
+    if (!window.confirm(`Delete engagement "${detail.name}" and its findings?`)) return;
+    await api.deleteEngagement(detail.id);
+    await refreshList();
   };
 
   if (!authenticated) {
@@ -178,7 +246,7 @@ export default function App() {
 
           <div className="text-xs text-slate-300 bg-slate-950 border border-slate-800 rounded-lg p-3">
             Enter your local API token (printed on server startup or via{" "}
-            <code className="text-cyan-300">aegispt token</code>).
+            <code className="text-cyan-300">./aegispt token</code>).
           </div>
 
           <div>
@@ -221,7 +289,10 @@ export default function App() {
 
           <select
             value={selectedId}
-            onChange={(e) => setSelectedId(e.target.value)}
+            onChange={(e) => {
+              setSelectedId(e.target.value);
+              setManualTarget("");
+            }}
             className="bg-slate-950 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-white min-w-[220px]"
           >
             {engagements.length === 0 && <option value="">No engagements yet</option>}
@@ -270,6 +341,13 @@ export default function App() {
               >
                 <Square className="w-3.5 h-3.5" /> Stop
               </button>
+              <button
+                onClick={handleDeleteEngagement}
+                className="p-1.5 rounded-lg bg-slate-800 hover:bg-red-950 text-slate-400 hover:text-red-300"
+                title="Delete engagement"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+              </button>
             </>
           )}
 
@@ -312,13 +390,15 @@ export default function App() {
         </div>
       ) : (
         <div className="flex-1 grid grid-cols-1 lg:grid-cols-12 gap-3 p-3 min-h-0">
-          {/* Left 7 Columns: Graph / Findings / Tool Runs */}
+          {/* Left 7 Columns: Graph / Endpoints / Findings / Runs / Approvals */}
           <div className="lg:col-span-7 flex flex-col gap-2 min-h-0">
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               {[
-                { id: "graph", label: "Attack-Surface Graph" },
+                { id: "graph", label: "Attack Graph" },
+                { id: "endpoints", label: `Endpoints (${detail.endpoints.length})` },
                 { id: "findings", label: `Findings (${detail.findings.length})` },
                 { id: "runs", label: `Tool Runs (${detail.tool_runs.length})` },
+                { id: "approvals", label: `Approvals (${detail.approvals.length})` },
               ].map((tab) => (
                 <button
                   key={tab.id}
@@ -341,8 +421,64 @@ export default function App() {
                   assets={detail.assets}
                   endpoints={detail.endpoints}
                   findings={detail.findings}
+                  onPivotTarget={(u) => setManualTarget(u)}
                 />
               )}
+
+              {activeTab === "endpoints" && (
+                <div className="h-full flex flex-col bg-slate-900/60 border border-slate-800 rounded-xl overflow-hidden">
+                  <div className="flex items-center justify-between px-4 py-2 border-b border-slate-800 bg-slate-900">
+                    <span className="text-xs font-semibold uppercase tracking-wider text-slate-300">
+                      Discovered Endpoints ({filteredEndpoints.length})
+                    </span>
+                    <div className="flex items-center gap-1.5 bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1">
+                      <Search className="w-3.5 h-3.5 text-slate-500" />
+                      <input
+                        value={endpointSearch}
+                        onChange={(e) => setEndpointSearch(e.target.value)}
+                        placeholder="Search path or param..."
+                        className="bg-transparent text-xs text-white focus:outline-none w-44"
+                      />
+                    </div>
+                  </div>
+                  <div className="flex-1 overflow-auto">
+                    <table className="w-full text-left text-xs">
+                      <thead className="bg-slate-900 text-slate-400 border-b border-slate-800">
+                        <tr>
+                          <th className="p-2.5">Method</th>
+                          <th className="p-2.5">URL</th>
+                          <th className="p-2.5">Params</th>
+                          <th className="p-2.5">Source</th>
+                          <th className="p-2.5">Action</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-800/70">
+                        {filteredEndpoints.map((ep) => (
+                          <tr key={ep.id} className="hover:bg-slate-800/40">
+                            <td className="p-2.5 font-mono font-semibold text-indigo-300">{ep.method}</td>
+                            <td className="p-2.5 font-mono text-slate-200 truncate max-w-[260px]" title={ep.url}>
+                              {ep.url}
+                            </td>
+                            <td className="p-2.5 text-[11px] text-cyan-300 font-mono">
+                              {[...ep.query_params, ...ep.body_params].join(", ") || "-"}
+                            </td>
+                            <td className="p-2.5 text-slate-400">{ep.source}</td>
+                            <td className="p-2.5">
+                              <button
+                                onClick={() => setManualTarget(ep.url)}
+                                className="flex items-center gap-1 text-[11px] text-emerald-400 hover:text-emerald-300 font-semibold"
+                              >
+                                <Send className="w-3 h-3" /> Pivot
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
               {activeTab === "findings" && (
                 <FindingsPanel
                   engagementId={detail.id}
@@ -350,6 +486,7 @@ export default function App() {
                   onRefresh={() => refreshDetail(detail.id)}
                 />
               )}
+
               {activeTab === "runs" && (
                 <div className="h-full bg-slate-900/60 border border-slate-800 rounded-xl overflow-auto">
                   <table className="w-full text-left text-xs">
@@ -360,6 +497,7 @@ export default function App() {
                         <th className="p-3">Target</th>
                         <th className="p-3">Status</th>
                         <th className="p-3">Duration</th>
+                        <th className="p-3">Log</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-800/70">
@@ -367,13 +505,56 @@ export default function App() {
                         <tr key={r.id} className="hover:bg-slate-800/40">
                           <td className="p-3 font-mono text-cyan-300">{r.tool_name}</td>
                           <td className="p-3">Tier {r.tier}</td>
-                          <td className="p-3 font-mono text-slate-300 truncate max-w-[240px]">{r.target}</td>
+                          <td className="p-3 font-mono text-slate-300 truncate max-w-[220px]">{r.target}</td>
                           <td className="p-3 uppercase text-[11px] font-semibold">{r.status}</td>
                           <td className="p-3 text-slate-400">{r.duration_ms ? `${r.duration_ms}ms` : "-"}</td>
+                          <td className="p-3">
+                            <button
+                              onClick={() => handleOpenRunLog(r)}
+                              className="flex items-center gap-1 text-[11px] text-cyan-400 hover:text-cyan-300"
+                            >
+                              <FileText className="w-3.5 h-3.5" /> View
+                            </button>
+                          </td>
                         </tr>
                       ))}
                     </tbody>
                   </table>
+                </div>
+              )}
+
+              {activeTab === "approvals" && (
+                <div className="h-full bg-slate-900/60 border border-slate-800 rounded-xl overflow-auto divide-y divide-slate-800/70">
+                  {detail.approvals.length === 0 && (
+                    <div className="p-6 text-center text-xs text-slate-500">
+                      No Tier 2/3 approval requests recorded yet.
+                    </div>
+                  )}
+                  {detail.approvals.map((ap) => (
+                    <div key={ap.id} className="p-3.5 text-xs flex items-start justify-between gap-3">
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-2">
+                          <span className="font-mono font-bold text-cyan-300">{ap.tool_name}</span>
+                          <span className="text-[10px] px-2 py-0.5 rounded bg-slate-800 text-slate-300 uppercase">
+                            Tier {ap.tier} • {ap.status}
+                          </span>
+                        </div>
+                        <div className="font-mono text-[11px] text-slate-400">{ap.target}</div>
+                        <div className="text-slate-300">{ap.rationale}</div>
+                        {ap.operator_note && (
+                          <div className="text-[11px] text-amber-300">Note: {ap.operator_note}</div>
+                        )}
+                      </div>
+                      {ap.status === "pending" && (
+                        <button
+                          onClick={() => setActiveApproval(ap)}
+                          className="px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-semibold shrink-0"
+                        >
+                          Review
+                        </button>
+                      )}
+                    </div>
+                  ))}
                 </div>
               )}
             </div>
@@ -422,12 +603,19 @@ export default function App() {
                   className="bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1.5 text-white font-mono"
                 >
                   <option value="http_probe">http_probe (T1)</option>
+                  <option value="subfinder">subfinder (T1)</option>
+                  <option value="httpx">httpx (T1)</option>
                   <option value="whatweb">whatweb (T1)</option>
                   <option value="wafw00f">wafw00f (T1)</option>
+                  <option value="sslscan">sslscan (T1)</option>
                   <option value="katana">katana (T1)</option>
+                  <option value="nmap">nmap (T2)</option>
                   <option value="ffuf">ffuf (T2)</option>
                   <option value="arjun">arjun (T2)</option>
                   <option value="nuclei">nuclei (T2)</option>
+                  <option value="zaproxy">zaproxy (T2/3)</option>
+                  <option value="dalfox">dalfox (T3)</option>
+                  <option value="sqlmap">sqlmap (T3)</option>
                 </select>
                 <input
                   value={manualTarget}
@@ -443,6 +631,12 @@ export default function App() {
                   {manualBusy ? "..." : "Run"}
                 </button>
               </div>
+              <input
+                value={manualArgsJson}
+                onChange={(e) => setManualArgsJson(e.target.value)}
+                placeholder='Optional args JSON e.g. {"mode":"api_discovery"}'
+                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1 font-mono text-[11px] text-slate-300"
+              />
               {manualError && <div className="text-red-400 text-[11px]">{manualError}</div>}
             </form>
           </div>
@@ -481,6 +675,38 @@ export default function App() {
           }}
           onClose={() => setActiveApproval(null)}
         />
+      )}
+
+      {selectedRunLog && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4">
+          <div className="w-full max-w-3xl bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[82vh]">
+            <div className="flex items-center justify-between px-5 py-3.5 border-b border-slate-800">
+              <div className="text-xs">
+                <span className="font-mono font-bold text-cyan-300">{selectedRunLog.run.tool_name}</span>
+                <span className="text-slate-400 ml-2">{selectedRunLog.run.target}</span>
+              </div>
+              <button onClick={() => setSelectedRunLog(null)} className="text-slate-400 hover:text-white">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-4 space-y-3 overflow-y-auto text-xs flex-1">
+              {selectedRunLog.run.argv?.length > 0 && (
+                <div>
+                  <div className="text-slate-400 font-semibold mb-1">Compiled Command (shell=False)</div>
+                  <pre className="bg-slate-950 border border-slate-800 rounded p-2.5 text-cyan-300 font-mono overflow-x-auto">
+                    {selectedRunLog.run.argv.join(" ")}
+                  </pre>
+                </div>
+              )}
+              <div>
+                <div className="text-slate-400 font-semibold mb-1">Raw Output Log</div>
+                <pre className="bg-slate-950 border border-slate-800 rounded p-3 text-slate-200 font-mono whitespace-pre-wrap break-words max-h-96 overflow-y-auto">
+                  {selectedRunLog.log}
+                </pre>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

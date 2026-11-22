@@ -39,6 +39,38 @@ def _severity_counts(findings: list[Finding]) -> dict[str, int]:
     return counts
 
 
+def _compute_security_score(counts: dict[str, int]) -> tuple[int, str]:
+    """Compute an overall posture score (0-100) and letter grade A-F."""
+    penalty = (
+        counts["critical"] * 25
+        + counts["high"] * 15
+        + counts["medium"] * 7
+        + counts["low"] * 2
+    )
+    score = max(0, 100 - penalty)
+    if score >= 90:
+        grade = "A"
+    elif score >= 75:
+        grade = "B"
+    elif score >= 60:
+        grade = "C"
+    elif score >= 40:
+        grade = "D"
+    else:
+        grade = "F"
+    return score, grade
+
+
+def _owasp_breakdown(findings: list[Finding]) -> list[tuple[str, int]]:
+    buckets: dict[str, int] = {}
+    for f in findings:
+        if f.status == "false_positive":
+            continue
+        cat = f.owasp_category or "Uncategorized / Informational"
+        buckets[cat] = buckets.get(cat, 0) + 1
+    return sorted(buckets.items(), key=lambda x: (-x[1], x[0]))
+
+
 def render_markdown_report(
     engagement: Engagement,
     assets: list[Asset],
@@ -48,6 +80,8 @@ def render_markdown_report(
 ) -> str:
     active = [f for f in _sorted_findings(findings) if f.status != "false_positive"]
     counts = _severity_counts(findings)
+    score, grade = _compute_security_score(counts)
+    owasp_rows_md = [f"| {cat} | {cnt} |" for cat, cnt in _owasp_breakdown(findings)]
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     lines: list[str] = [
@@ -56,6 +90,7 @@ def render_markdown_report(
         f"- **Generated:** {now}",
         f"- **Engagement ID:** `{engagement.id}`",
         f"- **Autonomy Mode:** `{engagement.autonomy_mode}`",
+        f"- **Security Posture Score:** **{score}/100 (Grade {grade})**",
         f"- **Objective:** {engagement.objective}",
         "",
         "## Executive Summary",
@@ -65,6 +100,12 @@ def render_markdown_report(
         "| Severity | Count |",
         "| :--- | ---: |",
         *(f"| {s.capitalize()} | {counts[s]} |" for s in ("critical", "high", "medium", "low", "info")),
+        "",
+        "### OWASP Category Distribution",
+        "",
+        "| OWASP Category | Count |",
+        "| :--- | ---: |",
+        *(owasp_rows_md or ["| _None recorded_ | 0 |"]),
         "",
         "## Attack Surface Summary",
         "",
@@ -123,6 +164,11 @@ def render_html_report(
 ) -> str:
     active = [f for f in _sorted_findings(findings) if f.status != "false_positive"]
     counts = _severity_counts(findings)
+    score, grade = _compute_security_score(counts)
+    owasp_rows_html = "".join(
+        f"<tr><td>{html.escape(cat)}</td><td><strong>{cnt}</strong></td></tr>"
+        for cat, cnt in _owasp_breakdown(findings)
+    )
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     sev_colors = {
@@ -205,22 +251,52 @@ def render_html_report(
   pre {{ background: #020617; border: 1px solid #1e293b; border-radius: 8px; padding: 12px; overflow-x: auto; font-size: 12px; color: #cbd5e1; }}
   code {{ font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: #7dd3fc; }}
   .block {{ margin-top: 12px; }}
+  .toolbar {{ display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; }}
+  .score-pill {{ background:#111827; border:1px solid #334155; border-radius:10px; padding:10px 16px; text-align:center; }}
+  .print-btn {{ background:#0284c7; color:#fff; border:none; border-radius:8px; padding:8px 14px; font-weight:600; cursor:pointer; }}
+  @media print {{
+    body {{ background:#ffffff; color:#0f172a; padding:12px; }}
+    .card, table, .finding, .score-pill {{ background:#ffffff; border-color:#cbd5e1; }}
+    th {{ background:#f1f5f9; color:#0f172a; }}
+    h1, .finding-head h3 {{ color:#0f172a; }}
+    .sub, .meta, .card-lbl {{ color:#475569; }}
+    pre {{ background:#f8fafc; color:#0f172a; border-color:#cbd5e1; }}
+    code {{ color:#0369a1; }}
+    .print-btn {{ display:none; }}
+    .finding {{ break-inside: avoid; }}
+  }}
 </style>
 </head>
 <body>
   <div class="container">
-    <header>
-      <h1>AegisPT Security Assessment Report</h1>
-      <div class="sub">
-        <strong>Engagement:</strong> {html.escape(engagement.name)} ({html.escape(engagement.id)}) &bull;
-        <strong>Mode:</strong> {html.escape(engagement.autonomy_mode)} &bull;
-        <strong>Generated:</strong> {now} &bull;
-        <strong>Assets:</strong> {len(assets)} &bull;
-        <strong>Endpoints:</strong> {len(endpoints)} &bull;
-        <strong>Tool Runs:</strong> {len(runs)}
+    <header class="toolbar">
+      <div>
+        <h1>AegisPT Security Assessment Report</h1>
+        <div class="sub">
+          <strong>Engagement:</strong> {html.escape(engagement.name)} ({html.escape(engagement.id)}) &bull;
+          <strong>Mode:</strong> {html.escape(engagement.autonomy_mode)} &bull;
+          <strong>Generated:</strong> {now} &bull;
+          <strong>Assets:</strong> {len(assets)} &bull;
+          <strong>Endpoints:</strong> {len(endpoints)} &bull;
+          <strong>Tool Runs:</strong> {len(runs)}
+        </div>
+      </div>
+      <div style="display:flex;align-items:center;gap:12px;">
+        <div class="score-pill">
+          <div style="font-size:22px;font-weight:800;color:#38bdf8;">{score}/100 ({grade})</div>
+          <div style="font-size:10px;letter-spacing:0.08em;color:#94a3b8;">POSTURE SCORE</div>
+        </div>
+        <button class="print-btn" onclick="window.print()">Print / Save PDF</button>
       </div>
     </header>
     <section class="cards">{''.join(cards_html)}</section>
+    <section>
+      <h2>OWASP Category Breakdown</h2>
+      <table>
+        <thead><tr><th>OWASP Category</th><th>Findings</th></tr></thead>
+        <tbody>{owasp_rows_html or '<tr><td colspan="2">No active findings recorded.</td></tr>'}</tbody>
+      </table>
+    </section>
     <section>
       <h2>Discovered Assets</h2>
       <table>

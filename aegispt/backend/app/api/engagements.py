@@ -26,7 +26,7 @@ from app.db.models import (
     ScopePolicyModel,
     ToolRun,
 )
-from app.tools.base import fingerprint_finding
+from app.db.persistence import persist_tool_result
 from app.tools.registry import tool_registry
 
 router = APIRouter(
@@ -61,6 +61,7 @@ def _serialize_engagement(e: Engagement, scope: ScopePolicyModel | None = None) 
             "max_rps": scope.max_rps,
             "max_concurrency": scope.max_concurrency,
             "custom_headers": scope.custom_headers,
+            "auth_cookies_keys": sorted((scope.auth_cookies or {}).keys()),
             "allow_private_ips": scope.allow_private_ips,
         }
     return out
@@ -379,7 +380,7 @@ async def run_tool_manually(
         scope=scope,
     )
 
-    run.status = "completed" if result.exit_code == 0 or result.findings or result.assets else "failed"
+    run.status = "completed" if result.exit_code == 0 or result.findings or result.assets or result.endpoints else "failed"
     run.exit_code = result.exit_code
     run.duration_ms = result.duration_ms
     run.raw_log_path = result.raw_log_path
@@ -387,66 +388,14 @@ async def run_tool_manually(
     run.error_message = result.error
     run.completed_at = datetime.now(timezone.utc)
 
-    for a in result.assets:
-        existing = (
-            await db.execute(
-                select(Asset).where(
-                    Asset.engagement_id == engagement_id,
-                    Asset.asset_type == a.asset_type,
-                    Asset.value == a.value,
-                )
-            )
-        ).scalar_one_or_none()
-        if not existing:
-            db.add(
-                Asset(
-                    engagement_id=engagement_id,
-                    asset_type=a.asset_type,
-                    value=a.value,
-                    ip_address=a.ip_address,
-                    status_code=a.status_code,
-                    title=a.title,
-                    waf=a.waf,
-                    technologies=a.technologies,
-                    headers=a.headers,
-                    discovered_by=a.discovered_by,
-                )
-            )
-
-    for f in result.findings:
-        fp = fingerprint_finding(f.tool_source, f.title, f.target_url, f.parameter)
-        existing_f = (
-            await db.execute(
-                select(Finding).where(Finding.engagement_id == engagement_id, Finding.fingerprint == fp)
-            )
-        ).scalar_one_or_none()
-        if not existing_f:
-            db.add(
-                Finding(
-                    engagement_id=engagement_id,
-                    title=f.title,
-                    severity=f.severity,
-                    status="open",
-                    cvss_score=f.cvss_score,
-                    cwe_id=f.cwe_id,
-                    owasp_category=f.owasp_category,
-                    target_url=f.target_url,
-                    parameter=f.parameter,
-                    description=f.description,
-                    evidence=f.evidence,
-                    poc_command=f.poc_command,
-                    remediation=f.remediation,
-                    tool_source=f.tool_source,
-                    fingerprint=fp,
-                )
-            )
+    new_findings = await persist_tool_result(db, engagement_id, result)
 
     await db.commit()
     await event_bus.publish(
         engagement_id=engagement_id,
         event_type="manual_tool_completed",
         agent_name="operator",
-        message=f"Manual `{adapter.name}` finished ({result.duration_ms}ms).",
+        message=f"Manual `{adapter.name}` finished ({result.duration_ms}ms, +{len(result.endpoints)} endpoints, +{new_findings} findings).",
         payload={"tool_run_id": run.id, "summary": result.summary},
     )
     return {

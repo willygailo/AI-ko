@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Plus, X } from "lucide-react";
+import { Plus, X, Lock } from "lucide-react";
 import { LLMProfileItem, api } from "../api/client";
 
 interface Props {
@@ -14,6 +14,9 @@ export const ScopeWizardModal: React.FC<Props> = ({ profiles, onCreated, onClose
   const [urlsText, setUrlsText] = useState("http://127.0.0.1:3000");
   const [domainsText, setDomainsText] = useState("");
   const [excludedPathsText, setExcludedPathsText] = useState("/logout\n/billing");
+  const [headersText, setHeadersText] = useState("");
+  const [cookiesText, setCookiesText] = useState("");
+  const [showAuthVault, setShowAuthVault] = useState(false);
   const [mode, setMode] = useState<"tiered" | "copilot" | "lab_autopilot">("tiered");
   const [tier2Auto, setTier2Auto] = useState(true);
   const [allowPrivateIps, setAllowPrivateIps] = useState(true);
@@ -27,6 +30,19 @@ export const ScopeWizardModal: React.FC<Props> = ({ profiles, onCreated, onClose
       .split(/[\n,]+/)
       .map((s) => s.trim())
       .filter(Boolean);
+
+  const parseKVLines = (txt: string, sep: ":" | "=") => {
+    const out: Record<string, string> = {};
+    for (const raw of txt.split("\n")) {
+      const line = raw.trim();
+      if (!line) continue;
+      const idx = line.indexOf(sep);
+      if (idx > 0) {
+        out[line.slice(0, idx).trim()] = line.slice(idx + 1).trim();
+      }
+    }
+    return out;
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -44,6 +60,8 @@ export const ScopeWizardModal: React.FC<Props> = ({ profiles, onCreated, onClose
           allowed_urls: splitLines(urlsText),
           allowed_domains: splitLines(domainsText),
           excluded_paths: splitLines(excludedPathsText),
+          custom_headers: parseKVLines(headersText, ":"),
+          auth_cookies: parseKVLines(cookiesText, "="),
           max_rps: maxRps,
           allow_private_ips: allowPrivateIps,
         },
@@ -178,13 +196,50 @@ export const ScopeWizardModal: React.FC<Props> = ({ profiles, onCreated, onClose
             </div>
           </div>
 
+          <div className="border border-slate-800 rounded-xl bg-slate-950/60">
+            <button
+              type="button"
+              onClick={() => setShowAuthVault(!showAuthVault)}
+              className="w-full flex items-center justify-between px-3 py-2 text-slate-300 hover:text-white font-medium"
+            >
+              <span className="flex items-center gap-1.5">
+                <Lock className="w-3.5 h-3.5 text-cyan-400" /> Auth Headers & Session Cookies (Optional)
+              </span>
+              <span className="text-[11px] text-slate-500">{showAuthVault ? "Hide" : "Configure"}</span>
+            </button>
+            {showAuthVault && (
+              <div className="p-3 pt-1 grid grid-cols-1 md:grid-cols-2 gap-3 border-t border-slate-800">
+                <div>
+                  <label className="block text-slate-400 mb-1">Headers (Key: Value per line)</label>
+                  <textarea
+                    rows={3}
+                    value={headersText}
+                    onChange={(e) => setHeadersText(e.target.value)}
+                    placeholder="Authorization: Bearer eyJ..."
+                    className="w-full bg-slate-950 border border-slate-800 rounded p-2 font-mono text-[11px] text-slate-200"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-400 mb-1">Cookies (name=value per line)</label>
+                  <textarea
+                    rows={3}
+                    value={cookiesText}
+                    onChange={(e) => setCookiesText(e.target.value)}
+                    placeholder="session_id=abc123"
+                    className="w-full bg-slate-950 border border-slate-800 rounded p-2 font-mono text-[11px] text-slate-200"
+                  />
+                </div>
+              </div>
+            )}
+          </div>
+
           <label className="flex items-center gap-2 text-slate-300">
             <input
               type="checkbox"
               checked={tier2Auto}
               onChange={(e) => setTier2Auto(e.target.checked)}
             />
-            Auto-approve bounded Tier 2 scans (ffuf, arjun, safe nuclei); always gate Tier 3
+            Auto-approve bounded Tier 2 scans (ffuf, arjun, safe nuclei, nmap); always gate Tier 3
           </label>
 
           {error && <div className="text-red-400 bg-red-950/40 border border-red-800 rounded p-2">{error}</div>}

@@ -78,5 +78,83 @@
       "Fingerprint backend server, frontend framework, and WAF presence.",
       "Run Tier-2 safe nuclei scan excluding dos, intrusive, and fuzz tags."
     ]
+  },
+  {
+    "id": "wstg-jwt-security",
+    "title": "JSON Web Token (JWT) Security & Session Analysis",
+    "wstg_id": "WSTG-SESS-10 / API2:2023",
+    "owasp_category": "API2:2023 - Broken Authentication",
+    "tags": "jwt bearer token authorization oauth session cookie alg none exp",
+    "summary": "Inspect JWT headers and claims for alg=none acceptance, missing expiration (exp), sensitive payload fields, and signature verification bypasses.",
+    "recommended_tools": ["http_probe", "nuclei"],
+    "checklist": [
+      "Decode observed JWT headers/claims passively without leaking secrets.",
+      "Flag alg=none, missing exp claims, or plaintext credentials inside JWT payloads."
+    ]
+  },
+  {
+    "id": "wstg-graphql-hardening",
+    "title": "GraphQL Introspection & Query Depth Assessment",
+    "wstg_id": "API8:2023 / WSTG-API-GRAPHQL",
+    "owasp_category": "API8:2023 - Security Misconfiguration",
+    "tags": "graphql introspection schema mutation query playground apollo",
+    "summary": "Check GraphQL endpoints for unauthenticated schema introspection, exposed GraphiQL/Playground consoles, and missing authorization on mutations.",
+    "recommended_tools": ["http_probe", "katana"],
+    "checklist": [
+      "Send non-mutating __schema introspection check to /graphql.",
+      "Review exposed query/mutation surface for privileged or unauthenticated operations."
+    ]
+  },
+  {
+    "id": "wstg-tls-transport",
+    "title": "Transport Layer Security (TLS) & Cipher Hardening",
+    "wstg_id": "WSTG-CRYP-01",
+    "owasp_category": "A02:2021 - Cryptographic Failures",
+    "tags": "https tls ssl certificate cipher hsts sslv3 tlsv1",
+    "summary": "Audit HTTPS ports for deprecated TLS 1.0/1.1 protocols, weak ciphers (RC4/3DES), and expired or self-signed certificates.",
+    "recommended_tools": ["sslscan", "http_probe"],
+    "checklist": [
+      "Run sslscan on HTTPS hosts to verify TLS 1.2/1.3 only and strong AEAD ciphers.",
+      "Verify certificate validity and HSTS enforcement."
+    ]
+  },
+  {
+    "id": "wstg-ssrf-surface",
+    "title": "Server-Side Request Forgery (SSRF) Parameter Surface",
+    "wstg_id": "WSTG-INPV-19 / API7:2023",
+    "owasp_category": "API7:2023 - Server Side Request Forgery",
+    "tags": "ssrf url uri webhook callback redirect proxy fetch import image",
+    "summary": "Identify parameters accepting URLs or remote resource references (url, callback, webhook, dest, next) and verify outbound filtering.",
+    "recommended_tools": ["arjun", "katana", "http_probe"],
+    "checklist": [
+      "Identify URL/webhook parameters via katana and arjun.",
+      "Propose approval-gated Tier-3 verification for unvalidated outbound fetches."
+    ]
+  },
+  {
+    "id": "wstg-ssti-surface",
+    "title": "Server-Side Template Injection (SSTI) Discovery",
+    "wstg_id": "WSTG-INPV-18",
+    "owasp_category": "A03:2021 - Injection",
+    "tags": "ssti template jinja twig pug handlebars ejs freemarker render preview",
+    "summary": "Detect endpoints reflecting dynamic user-controlled text into server-side template engines.",
+    "recommended_tools": ["arjun", "nuclei"],
+    "checklist": [
+      "Correlate detected frameworks (Jinja2, Twig, Pug, EJS) with user-controlled rendering endpoints.",
+      "Escalate suspected reflection points for operator-approved verification."
+    ]
+  },
+  {
+    "id": "wstg-network-services",
+    "title": "Host Port & Service Surface Fingerprinting",
+    "wstg_id": "WSTG-INFO-04",
+    "owasp_category": "A05:2021 - Security Misconfiguration",
+    "tags": "nmap port service ssh ftp redis mongo admin management console",
+    "summary": "Discover unexpected exposed TCP services, admin panels, or non-standard HTTP ports on allowlisted hosts.",
+    "recommended_tools": ["nmap", "http_probe"],
+    "checklist": [
+      "Run bounded top-100 TCP service discovery with nmap on allowlisted hostnames/IPs.",
+      "Audit newly uncovered HTTP/API ports within engagement scope."
+    ]
   }
 ]

@@ -64,3 +64,11 @@ class AegisClient:
             resp = client.patch(path, json=json_body)
             resp.raise_for_status()
             return resp
+
+    def delete(self, path: str) -> httpx.Response:
+        with httpx.Client(
+            base_url=self.base_url, headers=self.headers, timeout=30.0, trust_env=False
+        ) as client:
+            resp = client.delete(path)
+            resp.raise_for_status()
+            return resp

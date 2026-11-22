@@ -10,8 +10,10 @@ from app.tools.ffuf import FfufAdapter
 from app.tools.http_probe import HttpProbeAdapter
 from app.tools.httpx_tool import HttpxAdapter
 from app.tools.katana import KatanaAdapter
+from app.tools.nmap_tool import NmapAdapter
 from app.tools.nuclei import NucleiAdapter
 from app.tools.sqlmap import SqlmapAdapter
+from app.tools.sslscan_tool import SslscanAdapter
 from app.tools.subfinder import SubfinderAdapter
 from app.tools.wafw00f import Wafw00fAdapter
 from app.tools.whatweb import WhatWebAdapter
@@ -27,6 +29,8 @@ class ToolRegistry:
             KatanaAdapter(),
             WhatWebAdapter(),
             Wafw00fAdapter(),
+            SslscanAdapter(),
+            NmapAdapter(),
             FfufAdapter(),
             ArjunAdapter(),
             NucleiAdapter(),
