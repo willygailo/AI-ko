@@ -15,7 +15,7 @@ from rich.table import Table
 
 from aegispt_cli.client import AegisClient, resolve_api_token
 
-app = typer.Typer(help="AegisPT — Private AI Web & API Penetration Testing CLI")
+app = typer.Typer(name="aegispt", help="AegisPT — Private AI Web & API Penetration Testing CLI")
 engagement_app = typer.Typer(help="Create, list, and manage scoped engagements")
 app.add_typer(engagement_app, name="engagement")
 
@@ -323,5 +323,9 @@ def report(
         console.print(resp.text)
 
 
+def main() -> None:
+    app(prog_name="aegispt")
+
+
 if __name__ == "__main__":
-    app()
+    main()

@@ -151,8 +151,21 @@ cd AI-ko/aegispt
 cp .env.example .env
 
 # Verify all 14 Kali tool adapters, OWASP KB, and LLM endpoint reachability
-./aegispt doctor
+./aegispt doctor        # Add --json for machine-readable output
 ```
+
+<details>
+<summary>Optional: Install <code>aegispt</code> Globally & Enable Shell Completion</summary>
+
+The [`./aegispt`](./aegispt/aegispt) launcher works out of the box from `aegispt/` without installing anything globally. To invoke `aegispt` or `python -m aegispt_cli.main` from any directory and enable shell completion:
+
+```bash
+cd aegispt
+pip install --user --break-system-packages --no-build-isolation --no-deps -e .
+aegispt --install-completion
+```
+
+</details>
 
 > [!TIP]
 > Running on an 8 GB / CPU-only Kali machine? Use the included helper script to pull compact quantized Ollama models (`qwen2.5:3b` + `qwen2.5-coder:7b`), or attach a remote vLLM server from the Web Dashboard Settings modal.
@@ -169,6 +182,7 @@ cp .env.example .env
 
 - Web Dashboard & API listen on `http://127.0.0.1:8443` (serves `aegispt/frontend/dist` automatically when built).
 - Copy the local API bearer token printed on startup (or retrieve it anytime with `./aegispt token`).
+- Dashboard tabs include **Attack Graph** (zoom, search, pivot), **Endpoints** (parameter search + pivot), **Findings** (HTML/Print-PDF, Markdown, SARIF exports), **Tool Runs** (compiled `argv` & raw stdout/stderr viewer), and **Approvals** (interactive Tier-2/3 review + Auth Headers/Cookies vault).
 
 <details>
 <summary>Frontend Build & Hot-Reload Development Commands</summary>
@@ -204,6 +218,7 @@ Create a scoped engagement, stream live progress + Tier-3 approvals, and export 
 ./aegispt runs <ENGAGEMENT_ID>        # Inspect tool runs & raw logs (--log <RUN_ID>)
 ./aegispt findings <ENGAGEMENT_ID>
 ./aegispt report <ENGAGEMENT_ID> --format html --out report.html
+./aegispt engagement delete <ENGAGEMENT_ID>
 ```
 
 ---

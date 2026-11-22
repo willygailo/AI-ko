@@ -29,7 +29,7 @@ dev = [
 ]
 
 [project.scripts]
-aegispt = "aegispt_cli.main:app"
+aegispt = "aegispt_cli.main:main"
 aegispt-server = "app.main:run_server"
 
 [tool.setuptools.packages.find]

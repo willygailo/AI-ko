@@ -11,6 +11,10 @@ See the root [README.md](../README.md) for the complete architecture diagram, 3-
 ```bash
 cp .env.example .env
 ./aegispt doctor
+
+# Optional: install globally so `aegispt` and `python -m aegispt_cli.main` work anywhere
+pip install --user --break-system-packages --no-build-isolation --no-deps -e .
+aegispt --install-completion
 ```
 
 Optional local Ollama setup (tuned for 7.5–8 GB RAM hosts):
@@ -48,6 +52,7 @@ docker compose -f lab/docker-compose.lab.yml up -d
   --mode tiered
 
 ./aegispt run <ENGAGEMENT_ID>
+./aegispt runs <ENGAGEMENT_ID>
 ./aegispt findings <ENGAGEMENT_ID>
 ./aegispt report <ENGAGEMENT_ID> --format html --out report.html
 ```
