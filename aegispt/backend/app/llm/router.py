@@ -55,6 +55,7 @@ def default_profile_from_settings() -> LLMProfileConfig:
         name="local-ollama",
         provider="ollama",
         base_url=settings.ollama_url.rstrip("/"),
+        api_key=settings.ollama_api_key,
         fast_model=settings.ollama_fast_model,
         reasoning_model=settings.ollama_reasoning_model,
         redact_outbound=settings.redact_outbound,
@@ -160,6 +161,12 @@ class LLMRouter:
         )
         return parse_json_object(res.content)
 
+    def _ollama_url(self, base_url: str, endpoint: str) -> str:
+        base = base_url.rstrip("/")
+        if base.endswith("/api"):
+            return f"{base}/{endpoint.lstrip('/')}"
+        return f"{base}/api/{endpoint.lstrip('/')}"
+
     async def _call_ollama(
         self,
         *,
@@ -170,7 +177,10 @@ class LLMRouter:
         temperature: float,
         max_tokens: int,
     ) -> LLMCompletionResult:
-        url = f"{cfg.base_url.rstrip('/')}/api/chat"
+        url = self._ollama_url(cfg.base_url, "chat")
+        headers: dict[str, str] = {"Content-Type": "application/json"}
+        if cfg.api_key:
+            headers["Authorization"] = f"Bearer {cfg.api_key}"
         body: dict[str, Any] = {
             "model": model,
             "messages": messages,
@@ -186,7 +196,7 @@ class LLMRouter:
         async with httpx.AsyncClient(
             timeout=self.timeout, trust_env=not cfg.is_local_endpoint
         ) as client:
-            resp = await client.post(url, json=body)
+            resp = await client.post(url, json=body, headers=headers)
             resp.raise_for_status()
             data = resp.json()
 
@@ -252,7 +262,8 @@ class LLMRouter:
                 timeout=8.0, trust_env=not cfg.is_local_endpoint
             ) as client:
                 if cfg.provider == "ollama":
-                    resp = await client.get(f"{cfg.base_url.rstrip('/')}/api/tags")
+                    headers = {"Authorization": f"Bearer {cfg.api_key}"} if cfg.api_key else {}
+                    resp = await client.get(self._ollama_url(cfg.base_url, "tags"), headers=headers)
                     resp.raise_for_status()
                     data = resp.json()
                     models = [m.get("name") for m in data.get("models", []) if m.get("name")]

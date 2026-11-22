@@ -29,12 +29,14 @@ def test_parse_json_object_handles_markdown_fences():
 
 def test_llm_router_ollama_and_openai_compat_mock():
     captured_bodies = []
+    captured_auth = []
 
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):
             length = int(self.headers.get("Content-Length", "0"))
             body = json.loads(self.rfile.read(length).decode("utf-8"))
             captured_bodies.append((self.path, body))
+            captured_auth.append(self.headers.get("Authorization"))
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
@@ -66,7 +68,8 @@ def test_llm_router_ollama_and_openai_compat_mock():
             ollama_cfg = LLMProfileConfig(
                 name="test-ollama",
                 provider="ollama",
-                base_url=f"http://127.0.0.1:{port}",
+                base_url=f"http://127.0.0.1:{port}/api",
+                api_key="ollama-secret-key",
                 fast_model="qwen2.5:3b",
                 reasoning_model="qwen2.5-coder:7b",
             )
@@ -94,8 +97,10 @@ def test_llm_router_ollama_and_openai_compat_mock():
 
         asyncio.run(_run())
         assert captured_bodies[0][0] == "/api/chat"
+        assert captured_auth[0] == "Bearer ollama-secret-key"
         assert captured_bodies[0][1]["model"] == "qwen2.5:3b"
         assert captured_bodies[1][0] == "/v1/chat/completions"
+        assert captured_auth[1] == "Bearer testkey"
         assert captured_bodies[1][1]["model"] == "qwen-32b"
     finally:
         server.shutdown()

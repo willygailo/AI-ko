@@ -23,8 +23,9 @@ class Settings(BaseSettings):
 
     data_dir: Path = Field(default=Path("./data"))
 
-    # Default Local Ollama
+    # Default Local or Cloud Ollama
     ollama_url: str = Field(default="http://127.0.0.1:11434")
+    ollama_api_key: str = Field(default="")
     ollama_fast_model: str = Field(default="qwen2.5:3b")
     ollama_reasoning_model: str = Field(default="qwen2.5-coder:7b")
 
