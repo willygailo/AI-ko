@@ -1,5 +1,9 @@
 <div align="center">
 
+<img src="./docs/assets/aegispt-banner.jpg" alt="AegisPT — Private AI Web & API Penetration Testing Platform" width="100%" />
+
+<br />
+
 # AegisPT
 
 ### Private, Provider-Agnostic AI Web & API Penetration Testing Platform
@@ -12,10 +16,11 @@ Built for Kali Linux with allowlist-only scope enforcement, 3-tier human-in-the-
 [![React](https://img.shields.io/badge/React-18%20%2B%20TypeScript-61DAFB?style=for-the-badge&logo=react&logoColor=black)](https://react.dev/)
 [![Kali Linux](https://img.shields.io/badge/Kali%20Linux-Ready-557C94?style=for-the-badge&logo=kalilinux&logoColor=white)](https://www.kali.org/)
 
+[How to Set Up](#how-to-set-up) •
+[How to Use](#how-to-use) •
 [Architecture](#architecture) •
 [Autonomy & Guardrails](#autonomy--safety-guardrails) •
 [Tooling Matrix](#3-tier-tooling-matrix) •
-[Quick Start](#quick-start) •
 [API & Config](#configuration--api-reference) •
 [Testing & CI](#running-tests--ci)
 
@@ -33,6 +38,203 @@ Built for Kali Linux with allowlist-only scope enforcement, 3-tier human-in-the-
 | **Non-Bypassable Scope & Multi-Role Auth** | Default-deny `ScopePolicy` enforces normalized port/path allowlists (with URL-decoding & `posixpath` traversal checks), hop-by-hop redirect SSRF guards, DNS boundaries, encrypted **User A vs. User B** credentials for true IDOR/BOLA verification, bounded local `/oob` lab callback catcher, and `shell=False` typed `argv` execution. |
 | **Dual Operator Experience** | Operate from the **React Web Dashboard** (Attack Graph, **Chains**, **Skill Checklist**, Endpoints, Findings + **Re-Verify**, interactive **HTTP Repeater**, **Hypotheses**, **OOB Events**, **Scan Diff**, Raw Log Viewer, **Live Steering**, Approval Modal) or **Kali CLI** (`./aegispt` with automatic `latest` engagement resolution). |
 | **Developer-Ready Reporting** | One-click exports in **Print-ready HTML/PDF**, **Markdown**, **SARIF 2.1.0**, **JSON**, and shell-safe **`PoC Replay Script (.sh)`** with Posture Score, Synthesized Attack Chains, OWASP breakdown, CVSS v3.1 scores, PoC commands, and remediation guidance. |
+
+---
+
+## How to Set Up
+
+### Prerequisites
+
+| Requirement | Needed For | Notes |
+| :--- | :--- | :--- |
+| **Linux / Kali Linux** | Core platform & CLI | Built-in `http_probe`, `js_miner`, and core scanners work anywhere; Kali provides the external CLI binaries (`nmap`, `ffuf`, `nuclei`, `sqlmap`, `dalfox`, etc.) |
+| **Python 3.11+** | Backend & CLI | Required (`python3 -m venv` recommended on clean systems) |
+| **Node.js 24+ & `pnpm`** | Building the Web UI | Only needed when building or developing `aegispt/frontend` |
+| **Docker + Compose** *(Optional)* | Practice lab | For running the isolated localhost-only OWASP Juice Shop lab (`127.0.0.1:3000`) |
+| **LLM Provider** *(Optional)* | AI planning & triage | **Ollama Cloud**, **Local Ollama**, **OpenAI-compatible / vLLM**, or **Zero-LLM Offline mode** |
+
+### Step 1: Clone the Repository & Install Python Dependencies
+
+```bash
+git clone https://github.com/willygailo/AI-ko.git
+cd AI-ko/aegispt
+
+# Create an isolated virtualenv (recommended — ./aegispt detects .venv automatically)
+python3 -m venv .venv
+.venv/bin/pip install --upgrade pip
+.venv/bin/pip install -e ".[dev]"
+```
+
+<details>
+<summary>Optional: Enable Playwright SPA Inspector &amp; Shell Tab Completion</summary>
+
+```bash
+# Enable headless Chromium SPA inspection (`spa_inspector`)
+.venv/bin/pip install -e ".[spa]"
+.venv/bin/playwright install chromium
+
+# Enable CLI tab completion for bash/zsh/fish
+./aegispt --install-completion
+```
+
+The [`./aegispt`](./aegispt/aegispt) launcher automatically prefers `aegispt/.venv/bin/python3` when present and works even when symlinked (for example, `sudo ln -s "$PWD/aegispt" /usr/local/bin/aegispt`).
+
+</details>
+
+### Step 2: Configure Your AI Provider (`.env`)
+
+Copy the template and run the interactive setup wizard:
+
+```bash
+cp .env.example .env
+./aegispt setup
+```
+
+Choose whichever mode fits your machine:
+
+- **Option 1 — Ollama Cloud (0 MB local RAM)**:
+  ```bash
+  ./aegispt setup --provider cloud
+  ```
+  Configures `https://ollama.com` and stores your API key in `.env` (`0600`). You can also pass `--api-key-stdin` to avoid putting secrets in shell history.
+- **Option 2 — Local Ollama (100% offline on your machine)**:
+  ```bash
+  # Default --light profile: qwen2.5:1.5b + qwen2.5:3b (~2.5 GB, ideal for 7.5–8 GB RAM)
+  ./scripts/setup_ollama.sh
+
+  # Or --coder profile for 12+ GB RAM: qwen2.5:3b + qwen2.5-coder:7b (~6.5 GB)
+  ./scripts/setup_ollama.sh --coder
+
+  ./aegispt setup --provider local
+  ```
+- **Option 3 — Zero-LLM Offline Mode (no AI backend required)**:
+  ```bash
+  ./aegispt setup --provider offline
+  ```
+  Sets `AEGISPT_LLM_MODE=offline` to run deterministic OWASP WSTG + Skill Pack planning with zero outbound LLM requests.
+
+### Step 3: Build the Web Dashboard UI
+
+```bash
+cd frontend
+pnpm install --frozen-lockfile
+pnpm build
+cd ..
+```
+
+This builds `aegispt/frontend/dist/`, which the FastAPI server mounts automatically at `http://127.0.0.1:8443`.
+
+### Step 4: Verify Your Environment
+
+```bash
+# Check all 24 tool adapters, 21 KB playbooks/skills, and LLM reachability
+./aegispt doctor        # Add --json for machine-readable output
+
+# Browse all 24 tools & 12 native http_probe modes with example arguments
+./aegispt tools         # Optional: --tier 1 | 2 | 3
+```
+
+---
+
+## How to Use
+
+### 1. Start AegisPT & Get Your API Token
+
+From `AI-ko/aegispt/`:
+
+```bash
+./aegispt serve
+```
+
+- The Web Dashboard and REST/WebSocket API listen on **`http://127.0.0.1:8443`** (honoring `AEGISPT_HOST`/`AEGISPT_PORT` from `.env`).
+- For security, startup logs mask the bearer token by default (`AEGISPT_PRINT_TOKEN=0`). Retrieve it in another terminal anytime with:
+  ```bash
+  ./aegispt token
+  ```
+
+> [!TIP]
+> For active frontend hot-reload development (`:5173` proxying to `:8443`), run `make dev` from the repository root.
+
+---
+
+### 2. Option A — Use the Web Dashboard (`http://127.0.0.1:8443`)
+
+1. **Sign In**: Open `http://127.0.0.1:8443` and paste the bearer token from `./aegispt token`.
+2. **Verify AI & Tools (Optional)**: Click **Settings** to inspect `doctor` diagnostics, add/delete LLM profiles, or click **Set Default** on any profile.
+3. **Create a Scoped Engagement**: Click **`+ New`** to open the **Scope Wizard**:
+   - Enter authorized **Target URLs** / **Allowed Domains** (or click **Load Juice Shop Lab Preset** for local lab practice).
+   - Set **Allowed CIDRs**, **Excluded Hosts/Paths**, **Max Steps**, and **Autonomy Mode** (`tiered`, `copilot`, or `lab_autopilot`).
+   - Optionally add **User A / User B** headers or cookies in the encrypted **Multi-Role Auth Vault** to enable automated BOLA/IDOR testing.
+4. **Run, Steer & Approve**:
+   - Click **Start** to launch the Cognitive Orchestrator.
+   - Watch real-time progress in the **Live Agent Stream** and **Attack Graph**.
+   - Send mid-assessment guidance anytime via the **Live Steering** bar (e.g., *"Focus on GraphQL and JWT checks"*).
+   - When a **Tier 3** intrusive verification is proposed in `tiered` mode, review the exact command preview in the **Approval Modal** and choose **Approve**, **Modify Args**, or **Reject**.
+5. **Triage, Replay & Export Reports**:
+   - Inspect **Endpoints**, **Hypotheses**, **Skills**, **Chains**, **Runs** (with raw log viewer), **OOB Events**, and **Scan Diff** snapshots.
+   - Open **Findings** to mark items **Confirmed** / **False Positive**, click **Re-Verify**, or click **Send to Repeater** to craft and replay custom HTTP requests (with copyable `curl` commands).
+   - Export reports in one click: **HTML**, **Markdown**, **SARIF 2.1.0**, **JSON**, or a shell-safe **PoC Replay Script (`.sh`)**.
+
+---
+
+### 3. Option B — Use the Kali CLI (`./aegispt`) with the Local Practice Lab
+
+Spin up the hardened, localhost-only (`127.0.0.1:3000`) OWASP Juice Shop lab container:
+
+```bash
+cd aegispt
+docker compose -f lab/docker-compose.lab.yml up -d
+```
+
+Run a full scoped assessment from your terminal (`latest` engagement ID is used automatically when omitted):
+
+```bash
+# 1. Create a scoped engagement (add -H / --secondary-header for multi-role IDOR checks)
+./aegispt engagement create \
+  --name "Local Juice Shop" \
+  --url http://127.0.0.1:3000 \
+  --allow-private-ips \
+  --mode tiered
+
+# 2. Optional: guide the AI brain toward specific attack surfaces
+./aegispt steer "Focus on GraphQL, JWT alg=none, and multi-role BOLA checks"
+
+# 3. Start & stream live progress with interactive Tier-3 [a]pprove / [e]dit / [r]eject prompts
+./aegispt run
+
+# 4. Pause, resume, re-attach, stop, or run any single tool on demand
+./aegispt pause
+./aegispt resume
+./aegispt attach
+./aegispt stop
+./aegispt run-tool http_probe http://127.0.0.1:3000 --args '{"mode":"passive_audit"}'
+./aegispt approvals
+./aegispt snapshots
+./aegispt llm-profiles
+
+# 5. Inspect runs, hypotheses, skill coverage, attack chains, findings, deltas & replay HTTP
+./aegispt runs
+./aegispt hypotheses
+./aegispt checklist
+./aegispt chains
+./aegispt findings
+./aegispt findings triage <finding_id> --status confirmed
+./aegispt findings reverify <finding_id>
+./aegispt diff
+./aegispt repeat latest http://127.0.0.1:3000/api/Products
+
+# 6. Export HTML, JSON, SARIF, or shell-safe PoC replay scripts
+./aegispt report --format html --out report.html
+./aegispt report --format json --out report.json
+./aegispt report --format sarif --out report.sarif
+./aegispt report --format poc_sh --out verify_findings.sh
+```
+
+When finished practicing, tear down the local lab container:
+
+```bash
+docker compose -f lab/docker-compose.lab.yml down
+```
 
 ---
 
@@ -153,131 +355,6 @@ sequenceDiagram
 
 ---
 
-## Quick Start
-
-### 1. Clone, Configure & Run Diagnostics
-
-```bash
-git clone https://github.com/willygailo/AI-ko.git
-cd AI-ko/aegispt
-cp .env.example .env
-
-# Guided .env setup wizard (Ollama Cloud, Local Ollama, or Zero-LLM Offline mode)
-./aegispt setup
-
-# Verify all 24 Kali & native adapters, 21 KB playbooks/skills, and active LLM reachability
-./aegispt doctor        # Add --json for machine-readable output
-
-# Browse the interactive cheat sheet for all 24 tools & 12 http_probe modes
-./aegispt tools         # Optional: --tier 1 | 2 | 3
-```
-
-<details>
-<summary>Optional: Virtualenv Setup, Playwright SPA Extra &amp; Global CLI Install</summary>
-
-The [`./aegispt`](./aegispt/aegispt) launcher automatically prefers `aegispt/.venv/bin/python3` when present and works even when symlinked (e.g., `/usr/local/bin/aegispt`). For an isolated virtualenv install (recommended on clean Python 3.11+ hosts):
-
-```bash
-cd aegispt
-python3 -m venv .venv
-.venv/bin/pip install -e ".[dev]"
-
-# Optional: enable headless Chromium SPA inspection (`spa_inspector`)
-.venv/bin/pip install -e ".[spa]" && .venv/bin/playwright install chromium
-
-# Optional: enable shell tab completion
-./aegispt --install-completion
-```
-
-</details>
-
-> [!TIP]
-> **Local Ollama, Ollama Cloud, or Offline Mode**:
-> - **Local Ollama (`./scripts/setup_ollama.sh`)**:
->   - Default `--light` profile pulls `qwen2.5:1.5b` + `qwen2.5:3b` (~2.5 GB, ideal for 7.5–8 GB RAM hosts).
->   - Pass `--coder` (`./scripts/setup_ollama.sh --coder`) on hosts with 12+ GB RAM to pull `qwen2.5:3b` + `qwen2.5-coder:7b` (~6.5 GB).
-> - **Ollama Cloud**: Run `./aegispt setup --provider cloud` (or set `AEGISPT_OLLAMA_URL=https://ollama.com` + `AEGISPT_OLLAMA_API_KEY`) — or click the **Ollama Cloud** preset inside the Web Dashboard Settings modal.
-> - **Offline Mode**: Run `./aegispt setup --provider offline` to set `AEGISPT_LLM_MODE=offline` and run deterministic OWASP + Skill Pack planning with zero outbound LLM requests.
-
-### 2. Start the Backend & Web Dashboard
-
-```bash
-./aegispt serve
-```
-
-- Web Dashboard & API listen on `http://127.0.0.1:8443` (honoring `AEGISPT_HOST`/`AEGISPT_PORT` from `.env`, and serving `aegispt/frontend/dist` automatically when built).
-- Startup logs keep the raw bearer token masked by default (`AEGISPT_PRINT_TOKEN=0`); retrieve it anytime with `./aegispt token`.
-- Dashboard tabs include **Attack Graph**, **Chains** (synthesized multi-step attack paths), **Skills** (checklist coverage matrix), **Endpoints**, **Findings** (`Confirm`, `False Positive`, **Re-Verify**, `Send to Repeater`, and HTML/Markdown/SARIF/JSON/`PoC .sh` exports), **Hypotheses**, **Repeater**, **Runs**, **Approvals**, **OOB Events**, and **Diff**, plus the **Live Steering** bar and **Multi-Role Auth Vault** (`+ New`).
-
-<details>
-<summary>Frontend Build & Hot-Reload Development Commands</summary>
-
-```bash
-cd aegispt/frontend
-pnpm install --frozen-lockfile
-pnpm typecheck && pnpm lint && pnpm test && pnpm build   # Builds dist/ served by FastAPI on :8443
-pnpm dev                                                 # Optional Vite dev server on :5173
-```
-
-Or run both backend and frontend dev servers together from the repo root with `make dev`.
-
-</details>
-
-### 3. Try It Against a Local Test Lab (OWASP Juice Shop)
-
-Spin up the isolated localhost-only (`127.0.0.1:3000`) practice container:
-
-```bash
-cd aegispt
-docker compose -f lab/docker-compose.lab.yml up -d
-```
-
-Create a scoped engagement (using `--url`, optional `--domain` for host/subdomains, and optional `-H` / `--secondary-header` for multi-role IDOR checks), control its lifecycle, steer the AI brain, and export reports (`latest` engagement ID is used automatically when omitted):
-
-```bash
-# 1. Create scoped engagement (local URL and/or custom test-lab domain)
-./aegispt engagement create \
-  --name "Local Juice Shop" \
-  --url http://127.0.0.1:3000 \
-  --allow-private-ips \
-  --mode tiered
-
-# 2. Optional: guide the AI brain toward specific features mid-assessment
-./aegispt steer "Focus on GraphQL, JWT alg=none, and multi-role BOLA checks"
-
-# 3. Start & stream live progress + Tier-3 [a]pprove/[e]dit/[r]eject prompts
-./aegispt run
-
-# 4. Lifecycle control, re-attach, manual tool runs & governance
-./aegispt pause
-./aegispt resume
-./aegispt attach
-./aegispt stop
-./aegispt run-tool http_probe http://127.0.0.1:3000 --args '{"mode":"passive_audit"}'
-./aegispt approvals
-./aegispt snapshots
-./aegispt llm-profiles
-
-# 5. Inspect runs, hypotheses, skill coverage, attack chains, findings & deltas
-./aegispt runs
-./aegispt hypotheses
-./aegispt checklist
-./aegispt chains
-./aegispt findings
-./aegispt findings triage <finding_id> --status confirmed
-./aegispt findings reverify <finding_id>
-./aegispt diff
-./aegispt repeat latest http://127.0.0.1:3000/api/Products
-
-# 6. Export HTML/Markdown/SARIF/JSON reports & shell-safe PoC replay script
-./aegispt report --format html --out report.html
-./aegispt report --format json --out report.json
-./aegispt report --format sarif --out report.sarif
-./aegispt report --format poc_sh --out verify_findings.sh
-```
-
----
-
 ## Configuration & API Reference
 
 <details>
@@ -294,6 +371,7 @@ Create a scoped engagement (using `--url`, optional `--domain` for host/subdomai
 ├── Makefile                            # Root DevEx entrypoints (check, lint, test, build-ui, dev)
 ├── README.md
 ├── CONTRIBUTING.md / CODE_OF_CONDUCT.md / SECURITY.md
+├── docs/assets/aegispt-banner.jpg      # README hero banner
 └── aegispt/
     ├── aegispt                         # Symlink- & .venv-aware CLI launcher script (./aegispt)
     ├── pyproject.toml                  # Dependencies, extras, Ruff/Pytest/Pyrefly/Pyright config
@@ -351,7 +429,7 @@ Create a scoped engagement (using `--url`, optional `--domain` for host/subdomai
 </details>
 
 <details>
-<summary><strong>Authentication & REST / WebSocket Endpoints</strong></summary>
+<summary><strong>Authentication &amp; REST / WebSocket Endpoints</strong></summary>
 
 - **REST Authentication**: All `/api/v1/*` routes (except `/api/v1/system/health` and the lab `/oob/*` callback catcher) require header authentication via `Authorization: Bearer <token>` (or `X-API-Key: <token>`). Query-parameter `?token=` authentication is disabled on REST endpoints to prevent secret leakage in access logs and browser history.
 - **WebSocket Authentication**: `WS /api/v1/engagements/{id}/ws` (and legacy alias `WS /ws/engagements/{id}`) accepts `Authorization: Bearer <token>` headers (used by the CLI and API clients) or a short-lived, single-use `?ticket=<ticket>` issued by `POST /api/v1/system/ws-ticket` (used by the React Web Dashboard).
