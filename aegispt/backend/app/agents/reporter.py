@@ -10,7 +10,6 @@ from typing import Any
 
 from app.db.models import Asset, AttackChain, Endpoint, Engagement, Finding, ToolRun
 
-
 _CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
 _SHELL_OPERATOR_TOKENS = frozenset({";", "&&", "||", "|", "&", ">", ">>", "<", "<<", "<>", ">&", "<&", "(", ")"})
 _DISALLOWED_EXPANSION_RE = re.compile(r"`|\$\(|\$\{")

@@ -1,8 +1,8 @@
 """FastAPI entrypoint for AegisPT Private AI Pentesting Platform."""
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import uvicorn
@@ -12,7 +12,16 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select, update
 
 from app.agents.orchestrator import orchestrator_manager
-from app.api import approvals, engagements, findings, models_api, oob, reports, system, ws
+from app.api import (
+    approvals,
+    engagements,
+    findings,
+    models_api,
+    oob,
+    reports,
+    system,
+    ws,
+)
 from app.config import get_settings
 from app.core.vault import encrypt_str
 from app.db.database import close_db, init_db, session_scope

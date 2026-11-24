@@ -9,8 +9,12 @@ from urllib.parse import urlparse
 from pydantic import BaseModel, Field
 
 from app.core.scope import ScopePolicy, ScopeViolationError
-from app.tools.base import BaseToolAdapter, DiscoveredEndpoint, ToolResult, resolve_binary
-
+from app.tools.base import (
+    BaseToolAdapter,
+    DiscoveredEndpoint,
+    ToolResult,
+    resolve_binary,
+)
 
 BUILTIN_WEB_API_WORDS = [
     "api",

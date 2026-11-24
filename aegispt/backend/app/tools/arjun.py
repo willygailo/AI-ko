@@ -11,7 +11,12 @@ from urllib.parse import urlparse
 from pydantic import BaseModel, Field
 
 from app.core.scope import ScopePolicy, ScopeViolationError
-from app.tools.base import BaseToolAdapter, DiscoveredEndpoint, ToolResult, resolve_binary
+from app.tools.base import (
+    BaseToolAdapter,
+    DiscoveredEndpoint,
+    ToolResult,
+    resolve_binary,
+)
 
 
 def _cdata_safe(value: str) -> str:

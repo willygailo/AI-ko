@@ -1,0 +1,2 @@
+# Synthetic SecretRedactor PEM test fixture in backend/tests/test_security_hardening.py
+8a539129e513b1b09d076db74a06aa4c945f7f88:aegispt/backend/tests/test_security_hardening.py:private-key:104

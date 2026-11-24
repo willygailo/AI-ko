@@ -2,11 +2,11 @@
 from __future__ import annotations
 
 import asyncio
+import shlex
+import time
 from datetime import datetime, timezone
 from pathlib import Path
-import shlex
 from urllib.parse import urlparse
-import time
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -15,7 +15,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.chainer import synthesize_attack_chains
 from app.agents.orchestrator import orchestrator_manager
-from app.api.schemas import EngagementCreate, ManualToolRunInput, RepeaterRequestInput, SteerInput
+from app.api.schemas import (
+    EngagementCreate,
+    ManualToolRunInput,
+    RepeaterRequestInput,
+    SteerInput,
+)
 from app.config import get_settings
 from app.core.auth import require_api_token
 from app.core.events import event_bus

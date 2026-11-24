@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from sqlalchemy import select
 

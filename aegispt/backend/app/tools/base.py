@@ -21,7 +21,6 @@ from app.core.events import event_bus
 from app.core.redactor import SecretRedactor
 from app.core.scope import ScopePolicy, ScopeViolationError
 
-
 CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 

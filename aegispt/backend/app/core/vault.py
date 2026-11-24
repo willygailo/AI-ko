@@ -10,7 +10,6 @@ from cryptography.fernet import Fernet, InvalidToken
 
 from app.config import get_settings
 
-
 ENC_PREFIX = "enc:fernet:"
 _FERNET_CACHE: dict[Path, Fernet] = {}
 

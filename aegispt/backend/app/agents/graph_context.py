@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from typing import Any
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,7 +18,6 @@ from app.db.models import (
     ToolRun,
 )
 from app.knowledge.store import knowledge_store
-
 
 HIGH_VALUE_TOKENS = (
     "/admin",

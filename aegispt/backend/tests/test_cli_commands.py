@@ -3,15 +3,15 @@ from __future__ import annotations
 
 import asyncio
 import json
-from pathlib import Path
 import tomllib
+from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
+import yaml
 from setuptools import PackageFinder
 from typer.testing import CliRunner
-import yaml
 
 from aegispt_cli import client as cli_client
 from aegispt_cli import main as cli_main

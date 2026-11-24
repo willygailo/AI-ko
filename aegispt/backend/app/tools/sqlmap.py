@@ -9,8 +9,12 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from app.core.scope import ScopePolicy
-from app.tools.base import BaseToolAdapter, DiscoveredFinding, ToolResult, resolve_binary
-
+from app.tools.base import (
+    BaseToolAdapter,
+    DiscoveredFinding,
+    ToolResult,
+    resolve_binary,
+)
 
 PARAM_BLOCK_RE = re.compile(
     r"Parameter:\s*(?P<param>.+?)\n(?P<body>(?:    .+\n)+)", re.MULTILINE

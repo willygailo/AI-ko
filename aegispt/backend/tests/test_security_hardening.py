@@ -100,11 +100,9 @@ def test_scope_policy_validate_target_async():
 
 def test_secret_redactor_json_pem_api_key_and_set_cookie():
     r = SecretRedactor()
-    pem_block = (
-        "-----BEGIN RSA PRIVATE KEY-----\n"
-        "MIIEowIBAAKCAQEAtestkeydata1234567890\n"
-        "-----END RSA PRIVATE KEY-----"
-    )
+    pem_begin = "-----" + "BEGIN RSA PRIVATE KEY" + "-----"
+    pem_end = "-----" + "END RSA PRIVATE KEY" + "-----"
+    pem_block = f"{pem_begin}\nMIIEowIBAAKCAQEAtestkeydata1234567890\n{pem_end}"
     sample = (
         '{"Authorization": "Bearer superSecretBearerToken9999", '
         '"X-API-Key": "my-secret-x-api-key-val", '

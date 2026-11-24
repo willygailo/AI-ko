@@ -26,7 +26,6 @@ from app.tools.base import (
     ToolResult,
 )
 
-
 TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
 SECURITY_HEADERS = [
     "strict-transport-security",

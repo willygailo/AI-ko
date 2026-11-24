@@ -7,7 +7,11 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.schemas import FindingCreateInput, FindingUpdateInput, HypothesisUpdateInput
+from app.api.schemas import (
+    FindingCreateInput,
+    FindingUpdateInput,
+    HypothesisUpdateInput,
+)
 from app.core.auth import require_api_token
 from app.core.scope import ScopePolicy, ScopeViolationError
 from app.db.database import get_db

@@ -20,7 +20,6 @@ from app.tools.base import (
     ToolResult,
 )
 
-
 SCRIPT_SRC_RE = re.compile(r'<script[^>]+src=["\']([^"\']+\.js[^"\']*)["\']', re.IGNORECASE)
 SOURCE_MAP_RE = re.compile(r"//[#@]\s*sourceMappingURL=([^\s]+)")
 API_PATH_RE = re.compile(r"""["'`](\/(?:api|rest|v[1-9]|graphql|oauth|auth|admin|users)[A-Za-z0-9_./:-]{1,100})["'`]""")

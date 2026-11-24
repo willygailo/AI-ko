@@ -9,7 +9,13 @@ from urllib.parse import urlparse
 from pydantic import BaseModel, Field
 
 from app.core.scope import ScopePolicy
-from app.tools.base import BaseToolAdapter, DiscoveredAsset, DiscoveredFinding, ToolResult, resolve_binary
+from app.tools.base import (
+    BaseToolAdapter,
+    DiscoveredAsset,
+    DiscoveredFinding,
+    ToolResult,
+    resolve_binary,
+)
 
 
 class WpscanArgs(BaseModel):

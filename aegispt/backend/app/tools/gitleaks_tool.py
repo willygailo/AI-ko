@@ -8,7 +8,12 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from app.core.scope import ScopePolicy
-from app.tools.base import BaseToolAdapter, DiscoveredFinding, ToolResult, resolve_binary
+from app.tools.base import (
+    BaseToolAdapter,
+    DiscoveredFinding,
+    ToolResult,
+    resolve_binary,
+)
 from app.tools.js_miner import _mask_secret
 from app.tools.trufflehog_tool import TrufflehogAdapter, TrufflehogArgs
 

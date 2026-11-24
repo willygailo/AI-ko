@@ -34,7 +34,6 @@ from app.llm.schemas import PlannerDecision, ProposedToolCall
 from app.tools.base import ToolResult
 from app.tools.registry import tool_registry
 
-
 PLANNER_SYSTEM_PROMPT = """You are AegisPT Planner, a cognitive multi-skill Web Application & API Security Assessment Orchestrator.
 Given the Risk-Ranked Attack-Surface Graph, activated Offensive Skill Checklists, WAF posture, multi-role auth availability, live operator hints, and recent feedback, decide the next 1-3 highest-value tool calls.
 

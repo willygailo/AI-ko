@@ -1,8 +1,8 @@
 """Scoped Local Lab Out-of-Band (OOB) HTTP Callback Catcher."""
 from __future__ import annotations
 
-from collections import deque
 import time
+from collections import deque
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse

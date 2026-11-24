@@ -14,7 +14,6 @@ import yaml
 
 from app.config import get_settings
 
-
 PLAYBOOKS_FILE = Path(__file__).parent / "playbooks.json"
 SKILLS_DIR = Path(__file__).parent / "skills"
 

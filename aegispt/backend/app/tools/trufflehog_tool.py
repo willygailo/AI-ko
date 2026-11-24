@@ -13,7 +13,12 @@ from pydantic import BaseModel, Field
 
 from app.core.ratelimit import rate_limiters
 from app.core.scope import ScopePolicy
-from app.tools.base import BaseToolAdapter, DiscoveredFinding, ToolResult, resolve_binary
+from app.tools.base import (
+    BaseToolAdapter,
+    DiscoveredFinding,
+    ToolResult,
+    resolve_binary,
+)
 from app.tools.js_miner import SCRIPT_SRC_RE, _mask_secret
 
 

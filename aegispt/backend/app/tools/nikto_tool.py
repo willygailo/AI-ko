@@ -7,7 +7,12 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from app.core.scope import ScopePolicy
-from app.tools.base import BaseToolAdapter, DiscoveredFinding, ToolResult, resolve_binary
+from app.tools.base import (
+    BaseToolAdapter,
+    DiscoveredFinding,
+    ToolResult,
+    resolve_binary,
+)
 
 
 class NiktoArgs(BaseModel):

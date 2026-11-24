@@ -1,11 +1,11 @@
 """Nmap bounded TCP service & port fingerprinting adapter (Tier 2)."""
 from __future__ import annotations
 
-import defusedxml.ElementTree as ET
-from xml.etree.ElementTree import ParseError as XMLParseError
 from pathlib import Path
 from urllib.parse import urlparse
+from xml.etree.ElementTree import ParseError as XMLParseError
 
+import defusedxml.ElementTree as ET
 from pydantic import BaseModel, Field
 
 from app.core.scope import ScopePolicy

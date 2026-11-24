@@ -2,26 +2,26 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
 import functools
 import inspect
 import json
 import os
-from pathlib import Path
 import sys
 import tempfile
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from pathlib import Path
 from typing import Any, Optional
 
 import click
+import typer
+import websockets
 from rich.console import Console
 from rich.markup import escape
 from rich.panel import Panel
 from rich.prompt import Prompt
 from rich.table import Table
 from rich.text import Text
-import typer
-import websockets
 
 from aegispt_cli.client import (
     AegisAPIError,

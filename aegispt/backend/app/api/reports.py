@@ -1,7 +1,8 @@
 """Report export routes (Markdown, HTML, SARIF 2.1.0, JSON)."""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Path as ApiPath, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import Path as ApiPath
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession

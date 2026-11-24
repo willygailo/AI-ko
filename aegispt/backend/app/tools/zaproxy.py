@@ -20,7 +20,6 @@ from app.tools.base import (
     resolve_binary,
 )
 
-
 RISK_MAP = {
     "high": ("high", 7.8),
     "medium": ("medium", 5.5),

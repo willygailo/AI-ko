@@ -2,11 +2,11 @@
 from __future__ import annotations
 
 import shlex
-import defusedxml.ElementTree as ET
-from xml.etree.ElementTree import ParseError as XMLParseError
 from pathlib import Path
 from urllib.parse import urlparse
+from xml.etree.ElementTree import ParseError as XMLParseError
 
+import defusedxml.ElementTree as ET
 from pydantic import BaseModel, Field
 
 from app.core.scope import ScopePolicy
@@ -17,7 +17,6 @@ from app.tools.base import (
     ToolResult,
     resolve_binary,
 )
-
 
 WEAK_PROTOCOLS = {"sslv2", "sslv3", "tlsv1.0", "tlsv1.1", "tls 1.0", "tls 1.1"}
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import secrets
 import time
+
 from fastapi import Header, HTTPException, WebSocket, status
 
 from app.config import get_settings

@@ -12,7 +12,11 @@ import httpx
 
 from app.config import get_settings
 from app.core.redactor import SecretRedactor
-from app.core.scope import BLOCKED_METADATA_HOSTS, BLOCKED_METADATA_IPS, UNSAFE_CONTROL_RE
+from app.core.scope import (
+    BLOCKED_METADATA_HOSTS,
+    BLOCKED_METADATA_IPS,
+    UNSAFE_CONTROL_RE,
+)
 from app.llm.schemas import parse_json_object
 
 EXTRA_BLOCKED_LLM_HOSTS = BLOCKED_METADATA_HOSTS | {
