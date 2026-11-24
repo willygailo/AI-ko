@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -22,7 +21,18 @@ def test_frontend_dist_served_by_fastapi(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("AEGISPT_API_TOKEN", "ui_test_tok")
     get_settings.cache_clear()
 
-    app = create_app()
+    default_dist = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+    if (default_dist / "index.html").is_file():
+        app = create_app()
+    else:
+        mock_dist = tmp_path / "frontend_dist"
+        mock_dist.mkdir(parents=True, exist_ok=True)
+        (mock_dist / "index.html").write_text(
+            "<!doctype html><html><head><title>AegisPT</title></head><body>AegisPT</body></html>",
+            encoding="utf-8",
+        )
+        app = create_app(frontend_dist=mock_dist)
+
     with TestClient(app) as client:
         resp = client.get("/")
         assert resp.status_code == 200

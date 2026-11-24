@@ -5,15 +5,15 @@ import asyncio
 import json
 import re
 from pathlib import Path
+from typing import Any
 from urllib.parse import urljoin, urlparse
 
 import httpx
 from pydantic import BaseModel, Field
 
 from app.core.ratelimit import rate_limiters
-from app.core.redactor import SecretRedactor
 from app.core.scope import ScopePolicy
-from app.tools.base import BaseToolAdapter, DiscoveredFinding, ToolResult, resolve_binary, sanitize_argv
+from app.tools.base import BaseToolAdapter, DiscoveredFinding, ToolResult, resolve_binary
 from app.tools.js_miner import SCRIPT_SRC_RE, _mask_secret
 
 
@@ -59,7 +59,7 @@ class TrufflehogAdapter(BaseToolAdapter):
         async with httpx.AsyncClient(
             verify=False, follow_redirects=False, timeout=15.0, trust_env=not is_local
         ) as client:
-            scope.validate_target(target, resolve_dns=True)
+            await asyncio.to_thread(scope.validate_target, target, resolve_dns=True)
             await limiter.acquire()
             resp = await client.get(target, headers=headers)
             (capture_dir / "index.html").write_text(resp.text[:500000], encoding="utf-8", errors="replace")
@@ -72,7 +72,7 @@ class TrufflehogAdapter(BaseToolAdapter):
                     bundles.append(cand)
             for idx, bu in enumerate(bundles[: args.max_bundles]):
                 try:
-                    scope.validate_target(bu, resolve_dns=False)
+                    await asyncio.to_thread(scope.validate_target, bu, resolve_dns=True)
                     await limiter.acquire()
                     rb = await client.get(bu, headers=headers)
                     if rb.status_code == 200:
@@ -85,49 +85,36 @@ class TrufflehogAdapter(BaseToolAdapter):
                     continue
         return captured_urls
 
-    async def execute(
+    async def pre_execute(
         self,
         *,
         engagement_id: str,
         tool_run_id: str,
         target: str,
-        raw_args: dict,
+        args: BaseModel,
         scope: ScopePolicy,
-    ) -> ToolResult:
-        args = self.validate_args(raw_args)
+        work_dir: Path,
+    ) -> dict[str, Any]:
         assert isinstance(args, TrufflehogArgs)
-        norm_target = self.validate_scope(target, args, scope)
-        from app.config import get_settings
-
-        run_dir = get_settings().artifacts_dir / engagement_id / tool_run_id
-        run_dir.mkdir(parents=True, exist_ok=True)
-        capture_dir = run_dir / "captured"
+        capture_dir = work_dir / "captured"
         capture_dir.mkdir(parents=True, exist_ok=True)
-        captured_urls = await self._fetch_in_scope_artifacts(engagement_id, norm_target, args, scope, capture_dir)
+        captured_urls = await self._fetch_in_scope_artifacts(engagement_id, target, args, scope, capture_dir)
+        return {"bundles_fetched": len(captured_urls)}
 
-        argv = sanitize_argv(self.build_argv(norm_target, args, scope, run_dir))
-        proc = await asyncio.create_subprocess_exec(
-            *argv,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=str(run_dir),
-            env=self._subprocess_env(),
-        )
-        stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=args.timeout_seconds)
-        stdout_s = stdout_b.decode("utf-8", errors="replace")
-        stderr_s = stderr_b.decode("utf-8", errors="replace")
-
-        log_path = run_dir / f"{self.name}.log"
-        redactor = SecretRedactor()
-        log_path.write_text(
-            f"# ARGV: {' '.join(argv)}\n\n# STDOUT\n{redactor.redact(stdout_s)}\n\n# STDERR\n{redactor.redact(stderr_s)}\n",
-            encoding="utf-8",
-        )
-        parsed = self.parse_output(target=norm_target, args=args, stdout=stdout_s, stderr=stderr_s, work_dir=run_dir)
-        parsed.exit_code = proc.returncode or 0
-        parsed.raw_log_path = str(log_path)
-        parsed.summary["bundles_fetched"] = len(captured_urls)
-        return parsed
+    async def post_execute(
+        self,
+        *,
+        engagement_id: str,
+        tool_run_id: str,
+        target: str,
+        args: BaseModel,
+        scope: ScopePolicy,
+        work_dir: Path,
+        context: dict[str, Any],
+        result: ToolResult | None,
+    ) -> None:
+        if result is not None and "bundles_fetched" in context:
+            result.summary["bundles_fetched"] = context["bundles_fetched"]
 
     def parse_output(
         self, *, target: str, args: BaseModel, stdout: str, stderr: str, work_dir: Path

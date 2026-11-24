@@ -3,10 +3,18 @@ from __future__ import annotations
 
 import html
 import json
+import re
+import shlex
 from datetime import datetime, timezone
 from typing import Any
 
 from app.db.models import Asset, AttackChain, Endpoint, Engagement, Finding, ToolRun
+
+
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
+_SHELL_OPERATOR_TOKENS = frozenset({";", "&&", "||", "|", "&", ">", ">>", "<", "<<", "<>", ">&", "<&", "(", ")"})
+_DISALLOWED_EXPANSION_RE = re.compile(r"`|\$\(|\$\{")
+_DISALLOWED_EXECUTABLES = frozenset({"sh", "bash", "zsh", "dash", "ksh", "csh", "fish", "eval", "exec", "source", "."})
 
 
 SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
@@ -403,12 +411,53 @@ def render_sarif_report(engagement: Engagement, findings: list[Finding]) -> dict
     }
 
 
+def _sanitize_single_line(text: str) -> str:
+    """Strip control characters and newlines so text stays safely on a single line."""
+    return _CONTROL_CHAR_RE.sub(" ", str(text or "")).strip()
+
+
+def _sanitize_poc_command(raw_cmd: str) -> tuple[bool, str]:
+    """Validate and safely quote a PoC command for bash execution.
+
+    Returns (is_safe, rendered_command_or_reason). Rejects control chars, shell
+    metacharacters/chaining operators, command substitutions, and unparseable syntax.
+    """
+    if not raw_cmd or not isinstance(raw_cmd, str):
+        return False, "empty command"
+    if _CONTROL_CHAR_RE.search(raw_cmd):
+        return False, "contains newline or control characters"
+    if _DISALLOWED_EXPANSION_RE.search(raw_cmd):
+        return False, "contains shell command/variable expansion syntax"
+
+    try:
+        lexer = shlex.shlex(raw_cmd, posix=True, punctuation_chars=";&|<>()")
+        lexer.whitespace_split = True
+        tokens = list(lexer)
+    except ValueError as exc:
+        return False, f"unparseable shell syntax ({exc})"
+
+    if not tokens:
+        return False, "empty command"
+
+    for tok in tokens:
+        if tok in _SHELL_OPERATOR_TOKENS:
+            return False, f"contains shell operator {tok!r}"
+
+    exe = tokens[0].rsplit("/", 1)[-1].lower()
+    if exe in _DISALLOWED_EXECUTABLES:
+        return False, f"disallowed shell executable {exe!r}"
+
+    return True, shlex.join(tokens)
+
+
 def render_poc_script(engagement: Engagement, findings: list[Finding]) -> str:
     """Generate an executable bash verification regression script for confirmed/open findings."""
     active = [f for f in _sorted_findings(findings) if f.status != "false_positive" and f.poc_command]
+    safe_eng_name = _sanitize_single_line(engagement.name)
+    safe_eng_id = _sanitize_single_line(engagement.id)
     lines = [
         "#!/usr/bin/env bash",
-        f"# AegisPT Verification Replay Script — {engagement.name} ({engagement.id})",
+        f"# AegisPT Verification Replay Script — {safe_eng_name} ({safe_eng_id})",
         "# Run ONLY against authorized scope targets.",
         "set -uo pipefail",
         "",
@@ -418,13 +467,22 @@ def render_poc_script(engagement: Engagement, findings: list[Finding]) -> str:
         return "\n".join(lines) + "\n"
 
     for idx, f in enumerate(active, start=1):
-        safe_title = f.title.replace("'", "")
-        lines.extend(
-            [
-                f"echo '=== [{idx}] [{f.severity.upper()}] {safe_title} ==='",
-                f.poc_command or "",
-                "echo ''",
-                "",
-            ]
-        )
+        safe_sev = _sanitize_single_line(f.severity).upper()
+        safe_title = _sanitize_single_line(f.title)
+        banner = f"=== [{idx}] [{safe_sev}] {safe_title} ==="
+        lines.append(f"echo {shlex.quote(banner)}")
+
+        ok, rendered = _sanitize_poc_command(f.poc_command or "")
+        if ok:
+            lines.append(rendered)
+        else:
+            preview = _sanitize_single_line(f.poc_command or "")[:240]
+            lines.extend(
+                [
+                    f"# WARNING: Skipped unsafe PoC command ({rendered}):",
+                    f"# {preview}",
+                    f"echo {shlex.quote(f'[SKIPPED] Unsafe PoC command for finding #{idx}: {rendered}')}",
+                ]
+            )
+        lines.extend(["echo ''", ""])
     return "\n".join(lines)

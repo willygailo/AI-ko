@@ -1,6 +1,7 @@
 """SSLScan TLS protocol, cipher, and certificate security auditor (Tier 1)."""
 from __future__ import annotations
 
+import shlex
 import defusedxml.ElementTree as ET
 from xml.etree.ElementTree import ParseError as XMLParseError
 from pathlib import Path
@@ -85,7 +86,7 @@ class SslscanAdapter(BaseToolAdapter):
                                     cvss_score=5.3,
                                     description=f"Server supports deprecated protocol {full}, exposing connections to downgrade and cryptographic weaknesses.",
                                     evidence={"host": host, "protocol": full},
-                                    poc_command=f"sslscan --no-colour '{self._host_port(target)}'",
+                                    poc_command=f"sslscan --no-colour {shlex.quote(self._host_port(target))}",
                                     remediation="Disable SSLv2, SSLv3, TLS 1.0, and TLS 1.1; enforce TLS 1.2 and TLS 1.3 only.",
                                     tool_source=self.name,
                                 )
@@ -111,7 +112,7 @@ class SslscanAdapter(BaseToolAdapter):
                             cvss_score=5.3,
                             description=f"Server accepted weak cipher suites: {', '.join(weak_ciphers[:8])}.",
                             evidence={"weak_ciphers": weak_ciphers},
-                            poc_command=f"sslscan --no-colour '{self._host_port(target)}'",
+                            poc_command=f"sslscan --no-colour {shlex.quote(self._host_port(target))}",
                             remediation="Configure strong AEAD cipher suites (AES-GCM, ChaCha20-Poly1305) and disable RC4, 3DES, NULL, and export ciphers.",
                             tool_source=self.name,
                         )

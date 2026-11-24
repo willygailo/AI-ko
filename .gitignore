@@ -3,9 +3,14 @@
 .env.*
 !.env.example
 aegispt/data/
+.api_token
+.master.key
 *.pem
 *.key
 *.db
+*.db-wal
+*.db-shm
+*.db-journal
 *.sqlite
 *.sqlite3
 
@@ -28,6 +33,7 @@ htmlcov/
 # === Frontend (Node / pnpm / Vite / TypeScript) ===
 node_modules/
 aegispt/frontend/dist/
+tsconfig.tsbuildinfo
 *.tsbuildinfo
 .pnpm-store/
 npm-debug.log*
@@ -37,6 +43,9 @@ pnpm-debug.log*
 *.log
 aegispt-report-*
 *.sarif.json
+report.html
+verify_findings.sh
+*.poc.sh
 
 # === OS & Editor Artifacts ===
 .DS_Store

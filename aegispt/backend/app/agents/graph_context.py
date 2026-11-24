@@ -144,6 +144,7 @@ async def build_graph_context(session: AsyncSession, engagement_id: str) -> dict
             {
                 "tool": r.tool_name,
                 "target": r.target,
+                "args": r.args or {},
                 "status": r.status,
                 "summary": r.summary,
                 "error": r.error_message,

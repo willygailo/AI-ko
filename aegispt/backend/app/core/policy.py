@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -58,55 +59,56 @@ class ApprovalCoordinator:
         timeout_seconds: int | None = None,
     ) -> ApprovalDecision:
         timeout = timeout_seconds or get_settings().approval_timeout_seconds
-
-        async with session_scope() as session:
-            req = ApprovalRequest(
-                engagement_id=engagement_id,
-                tool_run_id=tool_run_id,
-                tool_name=tool_name,
-                tier=tier,
-                target=target,
-                proposed_args=proposed_args,
-                argv_preview=argv_preview,
-                rationale=rationale,
-                risk_summary=risk_summary,
-                status="pending",
-            )
-            session.add(req)
-
-            run = await session.get(ToolRun, tool_run_id)
-            if run:
-                run.status = "awaiting_approval"
-
-            eng = await session.get(Engagement, engagement_id)
-            if eng and eng.status == "running":
-                eng.status = "awaiting_approval"
-
-            await session.flush()
-            approval_id = req.id
-
+        approval_id = uuid.uuid4().hex[:16]
         waiter = asyncio.Event()
+        # Register waiter BEFORE committing to DB to eliminate the fast-resolve hang race.
         self._waiters[approval_id] = waiter
 
-        await event_bus.publish(
-            engagement_id=engagement_id,
-            event_type="approval_required",
-            agent_name="policy",
-            message=f"Approval required for Tier {tier} tool `{tool_name}` against {target}",
-            payload={
-                "approval_id": approval_id,
-                "tool_run_id": tool_run_id,
-                "tool_name": tool_name,
-                "tier": tier,
-                "target": target,
-                "proposed_args": proposed_args,
-                "argv_preview": argv_preview,
-                "rationale": rationale,
-                "risk_summary": risk_summary,
-            },
-        )
-
         try:
+            async with session_scope() as session:
+                req = ApprovalRequest(
+                    id=approval_id,
+                    engagement_id=engagement_id,
+                    tool_run_id=tool_run_id,
+                    tool_name=tool_name,
+                    tier=tier,
+                    target=target,
+                    proposed_args=proposed_args,
+                    argv_preview=argv_preview,
+                    rationale=rationale,
+                    risk_summary=risk_summary,
+                    status="pending",
+                )
+                session.add(req)
+
+                run = await session.get(ToolRun, tool_run_id)
+                if run:
+                    run.status = "awaiting_approval"
+
+                eng = await session.get(Engagement, engagement_id)
+                if eng and eng.status == "running":
+                    eng.status = "awaiting_approval"
+
+                await session.flush()
+
+            await event_bus.publish(
+                engagement_id=engagement_id,
+                event_type="approval_required",
+                agent_name="policy",
+                message=f"Approval required for Tier {tier} tool `{tool_name}` against {target}",
+                payload={
+                    "approval_id": approval_id,
+                    "tool_run_id": tool_run_id,
+                    "tool_name": tool_name,
+                    "tier": tier,
+                    "target": target,
+                    "proposed_args": proposed_args,
+                    "argv_preview": argv_preview,
+                    "rationale": rationale,
+                    "risk_summary": risk_summary,
+                },
+            )
+
             await asyncio.wait_for(waiter.wait(), timeout=timeout)
             decision = self._decisions.pop(approval_id, None)
             if decision is None:
@@ -144,6 +146,7 @@ class ApprovalCoordinator:
         decision: str,  # approved | modified | rejected | expired
         modified_args: dict[str, Any] | None = None,
         operator_note: str | None = None,
+        restore_running: bool = True,
     ) -> ApprovalRequest | None:
         now = datetime.now(timezone.utc)
         async with session_scope() as session:
@@ -171,7 +174,7 @@ class ApprovalCoordinator:
                     run.error_message = operator_note or f"Action {decision} by operator."
 
             eng = await session.get(Engagement, req.engagement_id)
-            if eng and eng.status == "awaiting_approval":
+            if restore_running and eng and eng.status == "awaiting_approval":
                 # Check if any other pending approvals exist
                 others = (
                     await session.execute(
@@ -226,6 +229,7 @@ class ApprovalCoordinator:
                 approval_id=aid,
                 decision="rejected",
                 operator_note="Engagement stopped by operator.",
+                restore_running=False,
             )
 
 

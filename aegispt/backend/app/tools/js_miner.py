@@ -1,8 +1,10 @@
 """Native JS Bundle, Source Map & DOM Sink Miner (Tier 1)."""
 from __future__ import annotations
 
+import asyncio
 import json
 import re
+import shlex
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
@@ -10,7 +12,7 @@ import httpx
 from pydantic import BaseModel, Field
 
 from app.core.ratelimit import rate_limiters
-from app.core.scope import ScopePolicy
+from app.core.scope import ScopePolicy, ScopeViolationError
 from app.tools.base import (
     BaseToolAdapter,
     DiscoveredEndpoint,
@@ -161,6 +163,7 @@ class JsMinerAdapter(BaseToolAdapter):
             if target.lower().split("?")[0].endswith(".js"):
                 bundle_urls.append(target)
             else:
+                await asyncio.to_thread(scope.validate_target, target, resolve_dns=True)
                 await limiter.acquire()
                 resp = await client.get(target, headers=headers)
                 for m in SCRIPT_SRC_RE.finditer(resp.text[:200000]):
@@ -173,7 +176,7 @@ class JsMinerAdapter(BaseToolAdapter):
 
             for bu in bundle_urls[: args.max_bundles]:
                 try:
-                    scope.validate_target(bu, resolve_dns=False)
+                    await asyncio.to_thread(scope.validate_target, bu, resolve_dns=True)
                     await limiter.acquire()
                     r = await client.get(bu, headers=headers)
                     if r.status_code == 200:
@@ -189,7 +192,7 @@ class JsMinerAdapter(BaseToolAdapter):
                             if not map_ref.startswith("data:"):
                                 map_url = urljoin(bu, map_ref)
                                 try:
-                                    scope.validate_target(map_url, resolve_dns=False)
+                                    await asyncio.to_thread(scope.validate_target, map_url, resolve_dns=True)
                                     await limiter.acquire()
                                     rm = await client.get(map_url, headers=headers)
                                     if rm.status_code == 200 and '"sources"' in rm.text[:2000]:
@@ -205,7 +208,7 @@ class JsMinerAdapter(BaseToolAdapter):
                                                 cvss_score=3.5,
                                                 description=f"Public source map `{map_url}` exposes unminified original frontend module paths ({len(m_obj.get('sources') or [])} source files).",
                                                 evidence={"map_url": map_url, "sample_sources": sources},
-                                                poc_command=f"curl -s '{map_url}' | head -c 500",
+                                                poc_command=f"curl -s {shlex.quote(map_url)}",
                                                 remediation="Restrict or remove .js.map files from public production web servers.",
                                                 tool_source=self.name,
                                             )
@@ -214,6 +217,15 @@ class JsMinerAdapter(BaseToolAdapter):
                                     pass
                 except Exception:
                     continue
+
+        filtered_endpoints: list[DiscoveredEndpoint] = []
+        for ep in endpoints:
+            try:
+                scope.validate_target(ep.url, resolve_dns=False)
+                filtered_endpoints.append(ep)
+            except ScopeViolationError:
+                continue
+        endpoints = filtered_endpoints
 
         return ToolResult(
             tool_name=self.name,

@@ -1,6 +1,7 @@
 """Playwright Headless SPA XHR/Fetch & LocalStorage/DOM Sink Inspector (Tier 1)."""
 from __future__ import annotations
 
+import asyncio
 import os
 import shutil
 from pathlib import Path
@@ -81,6 +82,8 @@ class SpaInspectorAdapter(BaseToolAdapter):
         seen_eps: set[tuple[str, str]] = set()
         storage_tokens: list[str] = []
 
+        await asyncio.to_thread(scope.validate_target, target, resolve_dns=True)
+
         async with async_playwright() as p:
             browser = await p.chromium.launch(
                 executable_path=exe,
@@ -100,7 +103,7 @@ class SpaInspectorAdapter(BaseToolAdapter):
                         await route.continue_()
                         return
                     try:
-                        scope.validate_target(req_url, resolve_dns=False)
+                        await asyncio.to_thread(scope.validate_target, req_url, resolve_dns=True)
                         await route.continue_()
                     except ScopeViolationError:
                         await route.abort()

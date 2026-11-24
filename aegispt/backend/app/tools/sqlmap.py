@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import shlex
 from pathlib import Path
 from typing import Literal
 
@@ -19,7 +20,11 @@ PARAM_BLOCK_RE = re.compile(
 class SqlmapArgs(BaseModel):
     method: Literal["GET", "POST", "PUT", "PATCH"] = "GET"
     data: str | None = None
-    param: str | None = None
+    param: str | None = Field(
+        default=None,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9_][A-Za-z0-9_.\[\]-]*(?:,[A-Za-z0-9_][A-Za-z0-9_.\[\]-]*)*$",
+    )
     level: int = Field(default=1, ge=1, le=2)
     risk: int = Field(default=1, ge=1, le=2)
     technique: str = Field(default="BEUT", pattern=r"^[BEUSTQ]{1,6}$")
@@ -94,7 +99,7 @@ class SqlmapAdapter(BaseToolAdapter):
                     cvss_score=9.3,
                     description=f"SQLMap confirmed SQL injection on parameter {param}.",
                     evidence={"parameter": param, "sqlmap_details": body[:1500]},
-                    poc_command=f"sqlmap -u '{target}' --batch --level=1 --risk=1 -p '{param}'",
+                    poc_command=f"sqlmap -u {shlex.quote(target)} --batch --level=1 --risk=1 -p {shlex.quote(param)}",
                     remediation="Use parameterized queries / prepared statements for all database access and reject unexpected input types.",
                     tool_source=self.name,
                 )

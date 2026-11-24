@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field
 
-from app.core.scope import ScopePolicy
+from app.core.scope import ScopePolicy, ScopeViolationError
 from app.tools.base import BaseToolAdapter, DiscoveredEndpoint, ToolResult, resolve_binary
 
 
@@ -61,7 +61,10 @@ class FfufArgs(BaseModel):
     wordlist_profile: Literal["builtin", "api", "common"] = "api"
     method: Literal["GET", "POST", "HEAD"] = "GET"
     max_time_seconds: int = Field(default=60, ge=10, le=120)
-    match_codes: str = Field(default="200,201,204,301,302,307,401,403,405")
+    match_codes: str = Field(
+        default="200,201,204,301,302,307,401,403,405",
+        pattern=r"^(?:all|[1-5][0-9]{2}(?:-[1-5][0-9]{2})?(?:,[1-5][0-9]{2}(?:-[1-5][0-9]{2})?)*)$",
+    )
     timeout_seconds: int = Field(default=120, ge=15, le=240)
 
 
@@ -119,7 +122,14 @@ class FfufAdapter(BaseToolAdapter):
         return argv
 
     def parse_output(
-        self, *, target: str, args: BaseModel, stdout: str, stderr: str, work_dir: Path
+        self,
+        *,
+        target: str,
+        args: BaseModel,
+        stdout: str,
+        stderr: str,
+        work_dir: Path,
+        scope: ScopePolicy | None = None,
     ) -> ToolResult:
         out_file = work_dir / "ffuf.json"
         endpoints: list[DiscoveredEndpoint] = []
@@ -130,6 +140,11 @@ class FfufAdapter(BaseToolAdapter):
                     url = item.get("url") or ""
                     if not url:
                         continue
+                    if scope is not None:
+                        try:
+                            scope.validate_target(url, resolve_dns=False)
+                        except ScopeViolationError:
+                            continue
                     p = urlparse(url)
                     endpoints.append(
                         DiscoveredEndpoint(

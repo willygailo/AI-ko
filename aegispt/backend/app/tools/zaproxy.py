@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import socket
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlparse
@@ -10,7 +11,7 @@ import httpx
 from pydantic import BaseModel, Field
 
 from app.config import get_settings
-from app.core.scope import ScopePolicy
+from app.core.scope import ScopePolicy, ScopeViolationError
 from app.tools.base import (
     BaseToolAdapter,
     DiscoveredEndpoint,
@@ -43,7 +44,25 @@ class ZapAdapter(BaseToolAdapter):
 
     def is_available(self) -> tuple[bool, str | None]:
         path = resolve_binary("zaproxy") or resolve_binary("zap.sh")
-        return (path is not None), path
+        if path is not None:
+            return True, path
+        settings = get_settings()
+        zap_url = (settings.zap_url or "").strip()
+        if not zap_url:
+            return False, None
+        parsed = urlparse(zap_url)
+        host = (parsed.hostname or "").lower()
+        if not host:
+            return False, None
+        # Remote ZAP daemon or explicitly keyed daemon does not require a local binary
+        if host not in {"127.0.0.1", "localhost", "::1"} or bool(settings.zap_api_key):
+            return True, f"remote-daemon:{zap_url}"
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        try:
+            with socket.create_connection((host, port), timeout=0.15):
+                return True, f"daemon:{zap_url}"
+        except OSError:
+            return False, None
 
     def effective_tier(self, args: BaseModel) -> int:
         assert isinstance(args, ZapArgs)
@@ -84,8 +103,9 @@ class ZapAdapter(BaseToolAdapter):
                 sp.raise_for_status()
                 scan_id = sp.json().get("scan")
 
-                deadline = asyncio.get_event_loop().time() + args.max_duration_seconds
-                while asyncio.get_event_loop().time() < deadline:
+                loop = asyncio.get_running_loop()
+                deadline = loop.time() + args.max_duration_seconds
+                while loop.time() < deadline:
                     st = await client.get(
                         f"{base}/JSON/spider/view/status/",
                         params={**params_auth, "scanId": scan_id},
@@ -101,7 +121,7 @@ class ZapAdapter(BaseToolAdapter):
                     )
                     ac.raise_for_status()
                     ac_id = ac.json().get("scan")
-                    while asyncio.get_event_loop().time() < deadline:
+                    while loop.time() < deadline:
                         st = await client.get(
                             f"{base}/JSON/ascan/view/status/",
                             params={**params_auth, "scanId": ac_id},
@@ -115,6 +135,10 @@ class ZapAdapter(BaseToolAdapter):
                     params={**params_auth, "scanId": scan_id},
                 )
                 for u in urls_resp.json().get("results", [])[:200]:
+                    try:
+                        scope.validate_target(u, resolve_dns=False)
+                    except ScopeViolationError:
+                        continue
                     p = urlparse(u)
                     endpoints.append(
                         DiscoveredEndpoint(method="GET", url=u, path=p.path or "/", source=self.name)

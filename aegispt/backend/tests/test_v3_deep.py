@@ -13,13 +13,10 @@ from fastapi.testclient import TestClient
 from app.config import get_settings
 from app.core.scope import ScopePolicy, ScopeViolationError
 from app.core.vault import decrypt_or_passthrough, encrypt_dict, encrypt_str
-from app.db.database import close_db, init_db, session_scope
-from app.db.models import Engagement, LLMProfile, ScopePolicyModel
 from app.llm.router import LLMProfileConfig, LLMRouter
 from app.main import create_app
 from app.tools.dnsx_tool import DnsxAdapter, DnsxArgs
 from app.tools.feroxbuster_tool import FeroxbusterAdapter, FeroxbusterArgs
-from app.tools.http_probe import HttpProbeAdapter
 from app.tools.js_miner import analyze_js_text
 from app.tools.naabu_tool import NaabuAdapter, NaabuArgs
 from app.tools.nikto_tool import NiktoAdapter, NiktoArgs
@@ -171,8 +168,10 @@ def test_llm_router_retries_and_failover():
 
         asyncio.run(_run())
     finally:
-        s1.shutdown(); s1.server_close()
-        s2.shutdown(); s2.server_close()
+        s1.shutdown()
+        s1.server_close()
+        s2.shutdown()
+        s2.server_close()
 
 
 def test_redirect_ssrf_bola_ssti_open_redirect_repeater_and_diff(tmp_path: Path, monkeypatch):

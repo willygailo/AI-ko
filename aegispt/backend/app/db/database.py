@@ -27,6 +27,8 @@ _session_factory: async_sessionmaker[AsyncSession] | None = None
 def configure_database(db_url: str | None = None) -> AsyncEngine:
     """Initialize (or reconfigure, e.g. for tests) the async SQLAlchemy engine."""
     global _engine, _session_factory
+    if _engine is not None:
+        _engine.sync_engine.dispose()
     if db_url is None:
         settings = get_settings()
         db_url = f"sqlite+aiosqlite:///{settings.db_path}"
@@ -101,10 +103,18 @@ async def init_db(db_url: str | None = None) -> None:
     """Create missing tables and auto-migrate new columns safely."""
     from app.db import models  # noqa: F401
 
-    engine = configure_database(db_url) if db_url else get_engine()
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-        await conn.run_sync(_ensure_sqlite_columns)
+    target_url = db_url or f"sqlite+aiosqlite:///{get_settings().db_path}"
+    if _engine is not None and str(_engine.url) != target_url:
+        await close_db()
+    engine = configure_database(target_url) if _engine is None else _engine
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(_ensure_sqlite_columns)
+    except Exception:
+        await close_db()
+        raise
+    get_settings().enforce_storage_permissions()
 
 
 async def close_db() -> None:
@@ -118,7 +128,11 @@ async def close_db() -> None:
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
     factory = get_session_factory()
     async with factory() as session:
-        yield session
+        try:
+            yield session
+        except Exception:
+            await session.rollback()
+            raise
 
 
 @asynccontextmanager

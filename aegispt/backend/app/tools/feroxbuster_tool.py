@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field
 
-from app.core.scope import ScopePolicy
+from app.core.scope import ScopePolicy, ScopeViolationError
 from app.tools.base import BaseToolAdapter, DiscoveredEndpoint, ToolResult, resolve_binary
 from app.tools.ffuf import BUILTIN_WEB_API_WORDS, WORDLIST_CANDIDATES
 
@@ -66,7 +66,14 @@ class FeroxbusterAdapter(BaseToolAdapter):
         return argv
 
     def parse_output(
-        self, *, target: str, args: BaseModel, stdout: str, stderr: str, work_dir: Path
+        self,
+        *,
+        target: str,
+        args: BaseModel,
+        stdout: str,
+        stderr: str,
+        work_dir: Path,
+        scope: ScopePolicy | None = None,
     ) -> ToolResult:
         out_file = work_dir / "ferox.json"
         raw = out_file.read_text(encoding="utf-8", errors="replace") if out_file.exists() else stdout
@@ -86,6 +93,11 @@ class FeroxbusterAdapter(BaseToolAdapter):
             url = obj.get("url") or ""
             if not url or url in seen:
                 continue
+            if scope is not None:
+                try:
+                    scope.validate_target(url, resolve_dns=False)
+                except ScopeViolationError:
+                    continue
             seen.add(url)
             p = urlparse(url)
             endpoints.append(

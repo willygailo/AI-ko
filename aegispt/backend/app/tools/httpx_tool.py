@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -20,6 +21,7 @@ class HttpxArgs(BaseModel):
     timeout_seconds: int = Field(default=90, ge=10, le=300)
 
 
+@lru_cache(maxsize=8)
 def _is_projectdiscovery_httpx(bin_path: str) -> bool:
     try:
         proc = subprocess.run(

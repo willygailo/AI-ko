@@ -1,9 +1,12 @@
 """Scoped Local Lab Out-of-Band (OOB) HTTP Callback Catcher."""
 from __future__ import annotations
 
+from collections import deque
+import time
+
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import require_api_token
@@ -12,6 +15,31 @@ from app.db.database import get_db
 from app.db.models import Engagement, OOBEvent
 
 router = APIRouter(tags=["oob"])
+
+OOB_MAX_BODY_BYTES = 2048
+OOB_MAX_EVENTS_PER_ENGAGEMENT = 200
+OOB_RATE_WINDOW_SECONDS = 10.0
+OOB_RATE_MAX_HITS_PER_WINDOW = 40
+ACTIVE_OOB_STATUSES = {"running", "awaiting_approval"}
+
+_oob_hit_windows: dict[str, deque[float]] = {}
+
+
+def reset_oob_rate_limits() -> None:
+    """Clear in-memory OOB rate-limit state (useful in tests)."""
+    _oob_hit_windows.clear()
+
+
+def _check_oob_rate_limit(engagement_id: str) -> bool:
+    now = time.monotonic()
+    window = _oob_hit_windows.setdefault(engagement_id, deque())
+    cutoff = now - OOB_RATE_WINDOW_SECONDS
+    while window and window[0] < cutoff:
+        window.popleft()
+    if len(window) >= OOB_RATE_MAX_HITS_PER_WINDOW:
+        return False
+    window.append(now)
+    return True
 
 
 @router.api_route(
@@ -29,10 +57,41 @@ async def capture_oob_callback(
     if not eng:
         return JSONResponse(status_code=404, content={"status": "unknown_engagement"})
 
-    raw_body = (await request.body())[:2048].decode("utf-8", errors="replace")
+    if eng.status not in ACTIVE_OOB_STATUSES:
+        return JSONResponse(
+            status_code=409,
+            content={"status": "engagement_inactive", "engagement_status": eng.status},
+        )
+
+    if not _check_oob_rate_limit(engagement_id):
+        return JSONResponse(status_code=429, content={"status": "rate_limited"})
+
+    existing_count = (
+        await db.execute(
+            select(func.count()).select_from(OOBEvent).where(OOBEvent.engagement_id == engagement_id)
+        )
+    ).scalar_one()
+    if existing_count >= OOB_MAX_EVENTS_PER_ENGAGEMENT:
+        return JSONResponse(status_code=429, content={"status": "oob_cap_reached"})
+
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        if not chunk:
+            continue
+        remaining = OOB_MAX_BODY_BYTES - total
+        if remaining <= 0:
+            break
+        piece = chunk[:remaining]
+        chunks.append(piece)
+        total += len(piece)
+        if total >= OOB_MAX_BODY_BYTES:
+            break
+    raw_body = b"".join(chunks).decode("utf-8", errors="replace")
+
     safe_headers = {
-        k: ("***" if k.lower() in {"authorization", "cookie"} else v[:200])
-        for k, v in request.headers.items()
+        k[:80]: ("***" if k.lower() in {"authorization", "cookie", "x-api-key"} else v[:200])
+        for k, v in list(request.headers.items())[:32]
     }
     src_ip = request.client.host if request.client else ""
     ev = OOBEvent(

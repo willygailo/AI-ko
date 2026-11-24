@@ -1,8 +1,10 @@
 """Engagement lifecycle, attack-surface inspection, and manual tool run routes."""
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
+import shlex
 from urllib.parse import urlparse
 import time
 
@@ -17,9 +19,8 @@ from app.api.schemas import EngagementCreate, ManualToolRunInput, RepeaterReques
 from app.config import get_settings
 from app.core.auth import require_api_token
 from app.core.events import event_bus
-from app.core.policy import approval_coordinator
 from app.core.ratelimit import rate_limiters
-from app.core.scope import ScopePolicy, ScopeViolationError
+from app.core.scope import UNSAFE_CONTROL_RE, ScopePolicy, ScopeViolationError
 from app.core.vault import encrypt_dict
 from app.db.database import get_db
 from app.db.models import (
@@ -31,6 +32,7 @@ from app.db.models import (
     Engagement,
     Finding,
     Hypothesis,
+    LLMProfile,
     OOBEvent,
     ScanSnapshot,
     ScopePolicyModel,
@@ -90,16 +92,13 @@ def _serialize_engagement(e: Engagement, scope: ScopePolicyModel | None = None) 
 @router.get("")
 async def list_engagements(db: AsyncSession = Depends(get_db)) -> dict[str, object]:
     rows = (
-        await db.execute(select(Engagement).order_by(Engagement.created_at.desc()))
-    ).scalars().all()
-    items = []
-    for e in rows:
-        scope = (
-            await db.execute(
-                select(ScopePolicyModel).where(ScopePolicyModel.engagement_id == e.id)
-            )
-        ).scalar_one_or_none()
-        items.append(_serialize_engagement(e, scope))
+        await db.execute(
+            select(Engagement, ScopePolicyModel)
+            .outerjoin(ScopePolicyModel, ScopePolicyModel.engagement_id == Engagement.id)
+            .order_by(Engagement.created_at.desc())
+        )
+    ).all()
+    items = [_serialize_engagement(e, scope) for e, scope in rows]
     return {"engagements": items}
 
 
@@ -129,6 +128,14 @@ async def create_engagement(body: EngagementCreate, db: AsyncSession = Depends(g
             status_code=400,
             detail="Scope must include at least one allowlisted domain, URL, or CIDR.",
         )
+
+    if body.llm_profile_id:
+        prof = await db.get(LLMProfile, body.llm_profile_id)
+        if not prof:
+            raise HTTPException(
+                status_code=404,
+                detail=f"LLM profile '{body.llm_profile_id}' not found.",
+            )
 
     eng = Engagement(
         name=body.name,
@@ -335,6 +342,7 @@ async def get_engagement(engagement_id: str, db: AsyncSession = Depends(get_db))
         "events": [
             {
                 "id": ev.id,
+                "engagement_id": ev.engagement_id,
                 "event_type": ev.event_type,
                 "agent_name": ev.agent_name,
                 "message": ev.message,
@@ -415,6 +423,7 @@ async def delete_engagement(engagement_id: str, db: AsyncSession = Depends(get_d
     if not eng:
         raise HTTPException(status_code=404, detail="Engagement not found.")
     await orchestrator_manager.stop(engagement_id)
+    rate_limiters.remove(engagement_id)
     await db.delete(eng)
     await db.commit()
     return {"deleted": engagement_id}
@@ -477,6 +486,13 @@ async def run_tool_manually(
     except KeyError:
         raise HTTPException(status_code=404, detail=f"Unknown tool: {body.tool_name}")
 
+    available, avail_detail = adapter.is_available()
+    if not available:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Tool '{adapter.name}' is not available on this host: {avail_detail}",
+        )
+
     try:
         validated_args = adapter.validate_args(body.args)
         norm_target = adapter.validate_scope(body.target, validated_args, scope)
@@ -494,16 +510,36 @@ async def run_tool_manually(
         started_at=datetime.now(timezone.utc),
     )
     db.add(run)
+    await db.flush()
+
+    work_dir = get_settings().artifacts_dir / engagement_id / run.id
+    work_dir.mkdir(parents=True, exist_ok=True)
+    run.argv = adapter.build_argv(norm_target, validated_args, scope, work_dir)
+
     await db.commit()
     await db.refresh(run)
 
-    result = await adapter.execute(
-        engagement_id=engagement_id,
-        tool_run_id=run.id,
-        target=norm_target,
-        raw_args=validated_args.model_dump(),
-        scope=scope,
-    )
+    try:
+        result = await adapter.execute(
+            engagement_id=engagement_id,
+            tool_run_id=run.id,
+            target=norm_target,
+            raw_args=validated_args.model_dump(),
+            scope=scope,
+        )
+    except Exception as exc:
+        run.status = "failed"
+        run.error_message = str(exc)
+        run.completed_at = datetime.now(timezone.utc)
+        await db.commit()
+        await event_bus.publish(
+            engagement_id=engagement_id,
+            event_type="manual_tool_failed",
+            agent_name="operator",
+            message=f"Manual `{adapter.name}` failed: {exc}",
+            payload={"tool_run_id": run.id, "error": str(exc)},
+        )
+        raise HTTPException(status_code=500, detail=f"Tool execution failed: {exc}")
 
     run.status = "completed" if result.exit_code == 0 or result.findings or result.assets or result.endpoints else "failed"
     run.exit_code = result.exit_code
@@ -531,6 +567,12 @@ async def run_tool_manually(
     }
 
 
+def _read_bounded_log(path: Path, max_bytes: int = 200_000) -> str:
+    with path.open("rb") as fh:
+        data = fh.read(max_bytes)
+    return data.decode("utf-8", errors="replace")
+
+
 @router.get("/{engagement_id}/runs/{run_id}/log")
 async def get_run_log(
     engagement_id: str,
@@ -542,10 +584,14 @@ async def get_run_log(
         raise HTTPException(status_code=404, detail="Tool run not found.")
     if not run.raw_log_path:
         return {"log": ""}
-    p = Path(run.raw_log_path)
+    artifacts_root = get_settings().artifacts_dir.resolve()
+    p = Path(run.raw_log_path).resolve()
+    if not p.is_relative_to(artifacts_root):
+        raise HTTPException(status_code=403, detail="Log path is outside artifacts directory.")
     if not p.is_file():
         return {"log": ""}
-    return {"log": p.read_text(encoding="utf-8", errors="replace")[:200000]}
+    content = await asyncio.to_thread(_read_bounded_log, p, 200_000)
+    return {"log": content}
 
 
 @router.get("/{engagement_id}/hypotheses")
@@ -587,12 +633,14 @@ async def create_snapshot(
         raise HTTPException(status_code=404, detail="Engagement not found.")
     snap = await capture_snapshot(db, engagement_id, label=label)
     await db.commit()
+    await db.refresh(snap)
     return {
         "id": snap.id,
         "label": snap.label,
         "assets_count": snap.assets_count,
         "endpoints_count": snap.endpoints_count,
         "findings_count": snap.findings_count,
+        "created_at": snap.created_at.isoformat() if snap.created_at else None,
     }
 
 
@@ -633,8 +681,12 @@ async def run_repeater(
         raise HTTPException(status_code=400, detail="Scope policy not found.")
     scope = ScopePolicy.from_orm(scope_row)
 
+    for hk, hv in body.headers.items():
+        if UNSAFE_CONTROL_RE.search(hk) or UNSAFE_CONTROL_RE.search(str(hv)):
+            raise HTTPException(status_code=400, detail=f"Header contains control characters: {hk!r}")
+
     try:
-        norm_url = scope.validate_target(body.url)
+        norm_url = await scope.validate_target_async(body.url)
     except ScopeViolationError as exc:
         raise HTTPException(status_code=403, detail=f"Scope blocked repeater target: {exc}")
 
@@ -673,12 +725,12 @@ async def run_repeater(
         raise HTTPException(status_code=502, detail=f"Repeater request failed: {exc}")
 
     elapsed_ms = int((time.monotonic() - start) * 1000)
-    curl_parts = [f"curl -i -s -X {body.method}"]
+    curl_parts = ["curl", "-i", "-s", "-X", shlex.quote(body.method)]
     for hk, hv in body.headers.items():
-        curl_parts.append(f"-H '{hk}: {hv}'")
+        curl_parts.extend(["-H", shlex.quote(f"{hk}: {hv}")])
     if body.body:
-        curl_parts.append(f"--data '{body.body[:500]}'")
-    curl_parts.append(f"'{norm_url}'")
+        curl_parts.extend(["--data", shlex.quote(body.body[:500])])
+    curl_parts.append(shlex.quote(norm_url))
 
     return {
         "status_code": resp.status_code,

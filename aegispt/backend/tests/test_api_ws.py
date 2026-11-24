@@ -102,10 +102,16 @@ def test_full_api_flow_against_local_mock_target(tmp_path: Path, monkeypatch):
             assert sarif.status_code == 200
             assert sarif.json()["version"] == "2.1.0"
 
-            # WebSocket stream replay & ping
-            with client.websocket_connect(f"/ws/engagements/{eng_id}?token=test_token_12345") as ws:
+            # WebSocket stream replay & ping via single-use WS ticket
+            ticket_resp = client.post("/api/v1/system/ws-ticket", headers=headers)
+            assert ticket_resp.status_code == 200
+            ws_ticket = ticket_resp.json()["ticket"]
+            assert ticket_resp.json()["expires_in"] == 30
+
+            with client.websocket_connect(f"/api/v1/engagements/{eng_id}/ws?ticket={ws_ticket}") as ws:
                 ev = ws.receive_json()
                 assert ev["engagement_id"] == eng_id
+                assert ev["replayed"] is True
                 ws.send_text("ping")
                 # Drain any remaining replay messages until pong
                 got_pong = False
@@ -115,6 +121,12 @@ def test_full_api_flow_against_local_mock_target(tmp_path: Path, monkeypatch):
                         got_pong = True
                         break
                 assert got_pong
+
+            # WebSocket via Authorization: Bearer header on legacy /ws/ path
+            with client.websocket_connect(f"/ws/engagements/{eng_id}", headers=headers) as ws:
+                ev = ws.receive_json()
+                assert ev["engagement_id"] == eng_id
+                assert ev["replayed"] is True
     finally:
         httpd.shutdown()
         httpd.server_close()

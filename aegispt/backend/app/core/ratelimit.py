@@ -32,5 +32,8 @@ class RateLimiterRegistry:
             self._limiters[engagement_id] = lim
         return lim
 
+    def remove(self, engagement_id: str) -> None:
+        self._limiters.pop(engagement_id, None)
+
 
 rate_limiters = RateLimiterRegistry()

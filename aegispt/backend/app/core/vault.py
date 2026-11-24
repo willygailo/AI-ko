@@ -12,25 +12,58 @@ from app.config import get_settings
 
 
 ENC_PREFIX = "enc:fernet:"
+_FERNET_CACHE: dict[Path, Fernet] = {}
+
+
+def reset_vault_cache() -> None:
+    """Clear cached Fernet instances (useful in tests when rotating key files)."""
+    _FERNET_CACHE.clear()
 
 
 def _key_path() -> Path:
-    return get_settings().resolved_data_dir / ".master.key"
+    return (get_settings().resolved_data_dir / ".master.key").resolve()
 
 
 def _get_fernet() -> Fernet:
     kp = _key_path()
+    cached = _FERNET_CACHE.get(kp)
+    if cached is not None:
+        return cached
+
+    key: bytes = b""
     if kp.is_file():
         key = kp.read_bytes().strip()
         if key:
-            return Fernet(key)
+            try:
+                os.chmod(kp, 0o600)
+            except OSError:
+                pass
+            fernet = Fernet(key)
+            _FERNET_CACHE[kp] = fernet
+            return fernet
+
     key = Fernet.generate_key()
-    kp.write_bytes(key + b"\n")
+    try:
+        fd = os.open(str(kp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(key + b"\n")
+    except FileExistsError:
+        existing = kp.read_bytes().strip()
+        if existing:
+            key = existing
+        else:
+            fd = os.open(str(kp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(key + b"\n")
+
     try:
         os.chmod(kp, 0o600)
     except OSError:
         pass
-    return Fernet(key)
+
+    fernet = Fernet(key)
+    _FERNET_CACHE[kp] = fernet
+    return fernet
 
 
 def encrypt_str(value: str) -> str:

@@ -27,17 +27,22 @@ async def persist_tool_result(
     Returns the number of newly inserted findings.
     """
     new_findings = 0
+    batch_assets: dict[tuple[str, str], Asset] = {}
+    batch_endpoints: dict[tuple[str, str], Endpoint] = {}
 
     for a in result.assets:
-        existing = (
-            await session.execute(
-                select(Asset).where(
-                    Asset.engagement_id == engagement_id,
-                    Asset.asset_type == a.asset_type,
-                    Asset.value == a.value,
+        a_key = (a.asset_type, a.value)
+        existing = batch_assets.get(a_key)
+        if existing is None:
+            existing = (
+                await session.execute(
+                    select(Asset).where(
+                        Asset.engagement_id == engagement_id,
+                        Asset.asset_type == a.asset_type,
+                        Asset.value == a.value,
+                    )
                 )
-            )
-        ).scalar_one_or_none()
+            ).scalar_one_or_none()
         if existing:
             if a.status_code is not None:
                 existing.status_code = a.status_code
@@ -52,32 +57,36 @@ async def persist_tool_result(
             )
             if a.headers:
                 existing.headers = {**(existing.headers or {}), **a.headers}
+            batch_assets[a_key] = existing
         else:
-            session.add(
-                Asset(
-                    engagement_id=engagement_id,
-                    asset_type=a.asset_type,
-                    value=a.value,
-                    ip_address=a.ip_address,
-                    status_code=a.status_code,
-                    title=a.title,
-                    waf=a.waf,
-                    technologies=a.technologies,
-                    headers=a.headers,
-                    discovered_by=a.discovered_by,
-                )
+            row = Asset(
+                engagement_id=engagement_id,
+                asset_type=a.asset_type,
+                value=a.value,
+                ip_address=a.ip_address,
+                status_code=a.status_code,
+                title=a.title,
+                waf=a.waf,
+                technologies=list(a.technologies or []),
+                headers=dict(a.headers or {}),
+                discovered_by=a.discovered_by,
             )
+            session.add(row)
+            batch_assets[a_key] = row
 
     for ep in result.endpoints:
-        existing_ep = (
-            await session.execute(
-                select(Endpoint).where(
-                    Endpoint.engagement_id == engagement_id,
-                    Endpoint.method == ep.method,
-                    Endpoint.url == ep.url,
+        ep_key = (ep.method, ep.url)
+        existing_ep = batch_endpoints.get(ep_key)
+        if existing_ep is None:
+            existing_ep = (
+                await session.execute(
+                    select(Endpoint).where(
+                        Endpoint.engagement_id == engagement_id,
+                        Endpoint.method == ep.method,
+                        Endpoint.url == ep.url,
+                    )
                 )
-            )
-        ).scalar_one_or_none()
+            ).scalar_one_or_none()
         if existing_ep:
             existing_ep.query_params = sorted(
                 set(existing_ep.query_params or []) | set(ep.query_params or [])
@@ -89,20 +98,21 @@ async def persist_tool_result(
                 existing_ep.status_code = ep.status_code
             if ep.content_type and not existing_ep.content_type:
                 existing_ep.content_type = ep.content_type
+            batch_endpoints[ep_key] = existing_ep
         else:
-            session.add(
-                Endpoint(
-                    engagement_id=engagement_id,
-                    method=ep.method,
-                    url=ep.url,
-                    path=ep.path,
-                    query_params=ep.query_params,
-                    body_params=ep.body_params,
-                    status_code=ep.status_code,
-                    content_type=ep.content_type,
-                    source=ep.source,
-                )
+            ep_row = Endpoint(
+                engagement_id=engagement_id,
+                method=ep.method,
+                url=ep.url,
+                path=ep.path,
+                query_params=list(ep.query_params or []),
+                body_params=list(ep.body_params or []),
+                status_code=ep.status_code,
+                content_type=ep.content_type,
+                source=ep.source,
             )
+            session.add(ep_row)
+            batch_endpoints[ep_key] = ep_row
 
     existing_eng_findings = (
         await session.execute(

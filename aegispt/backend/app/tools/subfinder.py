@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field
 
-from app.core.scope import ScopePolicy
+from app.core.scope import ScopePolicy, ScopeViolationError
 from app.tools.base import BaseToolAdapter, DiscoveredAsset, ToolResult, resolve_binary
 
 
@@ -38,7 +38,14 @@ class SubfinderAdapter(BaseToolAdapter):
         return argv
 
     def parse_output(
-        self, *, target: str, args: BaseModel, stdout: str, stderr: str, work_dir: Path
+        self,
+        *,
+        target: str,
+        args: BaseModel,
+        stdout: str,
+        stderr: str,
+        work_dir: Path,
+        scope: ScopePolicy | None = None,
     ) -> ToolResult:
         assets: list[DiscoveredAsset] = []
         seen: set[str] = set()
@@ -55,6 +62,11 @@ class SubfinderAdapter(BaseToolAdapter):
             except json.JSONDecodeError:
                 host = line.lower()
             if host and host not in seen:
+                if scope is not None:
+                    try:
+                        scope.validate_target(host, resolve_dns=False)
+                    except ScopeViolationError:
+                        continue
                 seen.add(host)
                 assets.append(
                     DiscoveredAsset(

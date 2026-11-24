@@ -14,6 +14,43 @@ export interface ScopePolicy {
   allow_private_ips: boolean;
 }
 
+export interface ScopePolicyInputPayload {
+  allowed_domains?: string[];
+  allowed_urls?: string[];
+  allowed_cidrs?: string[];
+  excluded_hosts?: string[];
+  excluded_paths?: string[];
+  max_rps?: number;
+  max_concurrency?: number;
+  custom_headers?: Record<string, string>;
+  auth_cookies?: Record<string, string>;
+  secondary_headers?: Record<string, string>;
+  secondary_cookies?: Record<string, string>;
+  allow_private_ips?: boolean;
+}
+
+export interface EngagementCreatePayload {
+  name: string;
+  description?: string;
+  objective?: string;
+  autonomy_mode: "tiered" | "copilot" | "lab_autopilot";
+  tier2_auto: boolean;
+  max_steps: number;
+  llm_profile_id: string | null;
+  scope: ScopePolicyInputPayload;
+}
+
+export interface LLMProfileCreatePayload {
+  name: string;
+  provider: "ollama" | "openai_compat";
+  base_url: string;
+  api_key: string;
+  fast_model: string;
+  reasoning_model: string;
+  redact_outbound: boolean;
+  is_default: boolean;
+}
+
 export interface AttackChainItem {
   id: string;
   title: string;
@@ -136,12 +173,13 @@ export interface FindingItem {
 
 export interface AgentEventItem {
   id: number | null;
-  engagement_id: string;
+  engagement_id?: string;
   event_type: string;
   agent_name: string;
   message: string;
   payload: Record<string, unknown>;
   created_at: string | null;
+  replayed?: boolean;
 }
 
 export interface HypothesisItem {
@@ -186,6 +224,21 @@ export interface RepeaterResponse {
   headers: Record<string, string>;
   body: string;
   curl_command: string;
+}
+
+export interface ReverifyFindingResponse {
+  id?: string;
+  finding_id?: string;
+  status: string;
+  still_present: boolean | null;
+  manual_reverify_required?: boolean;
+  message?: string;
+  verified_at?: string | null;
+}
+
+export interface WsTicketResponse {
+  ticket: string;
+  expires_in: number;
 }
 
 export interface EngagementDetail extends Engagement {
@@ -238,38 +291,150 @@ export interface DoctorResponse {
   knowledge_playbooks: number;
 }
 
+export interface EngagementActionResponse {
+  status?: string;
+  engagement_id?: string;
+  message?: string;
+}
+
+export interface ApprovalDecisionResponse {
+  id?: string;
+  status: string;
+}
+
+export interface FindingMutationResponse {
+  id: string;
+  title?: string;
+  status?: string;
+  severity?: string;
+}
+
+export interface HypothesisMutationResponse {
+  id: string;
+  status: string;
+  evidence_note?: string;
+}
+
+export interface ManualToolRunResponse {
+  tool_run_id?: string;
+  status?: string;
+  summary?: Record<string, unknown>;
+}
+
+export type ReportFormat = "html" | "markdown" | "sarif" | "json" | "poc_sh";
+
+export class ApiError extends Error {
+  status: number;
+  detail: string;
+  rawBody: string;
+
+  constructor(status: number, detail: string, rawBody = "") {
+    super(detail);
+    this.name = "ApiError";
+    this.status = status;
+    this.detail = detail;
+    this.rawBody = rawBody;
+  }
+}
+
+export function parseApiErrorMessage(status: number, bodyText: string): string {
+  const trimmed = bodyText.trim();
+  if (!trimmed) {
+    return `Request failed with HTTP ${status}.`;
+  }
+  try {
+    const parsed: unknown = JSON.parse(trimmed);
+    if (parsed && typeof parsed === "object" && "detail" in parsed) {
+      const detail = (parsed as { detail: unknown }).detail;
+      if (typeof detail === "string" && detail.trim()) {
+        return detail.trim();
+      }
+      if (Array.isArray(detail) && detail.length > 0) {
+        const parts = detail
+          .map((item) => {
+            if (typeof item === "string") return item;
+            if (item && typeof item === "object") {
+              const rec = item as { loc?: unknown; msg?: unknown };
+              const loc = Array.isArray(rec.loc)
+                ? rec.loc.filter((segment) => segment !== "body").join(".")
+                : "";
+              const msg = typeof rec.msg === "string" ? rec.msg : JSON.stringify(item);
+              return loc ? `${loc}: ${msg}` : msg;
+            }
+            return String(item);
+          })
+          .filter(Boolean);
+        if (parts.length > 0) {
+          return parts.join("; ");
+        }
+      }
+    }
+  } catch {
+    // Plain-text body fallback
+  }
+  return `${status}: ${trimmed}`;
+}
+
 const TOKEN_STORAGE_KEY = "aegispt_api_token";
 
+type UnauthorizedHandler = (reason?: string) => void;
+let unauthorizedHandler: UnauthorizedHandler | null = null;
+
+export function setUnauthorizedHandler(handler: UnauthorizedHandler | null): void {
+  unauthorizedHandler = handler;
+}
+
 export function getStoredToken(): string {
+  if (typeof localStorage === "undefined") return "";
   return localStorage.getItem(TOKEN_STORAGE_KEY) || "";
 }
 
 export function setStoredToken(tok: string): void {
+  if (typeof localStorage === "undefined") return;
   localStorage.setItem(TOKEN_STORAGE_KEY, tok.trim());
 }
 
-async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
+export function clearStoredToken(): void {
+  if (typeof localStorage === "undefined") return;
+  localStorage.removeItem(TOKEN_STORAGE_KEY);
+}
+
+export interface ApiFetchOptions extends RequestInit {
+  skipUnauthorizedHandler?: boolean;
+}
+
+export async function apiFetch<T>(path: string, init: ApiFetchOptions = {}): Promise<T> {
+  const { skipUnauthorizedHandler = false, ...fetchInit } = init;
   const token = getStoredToken();
-  const headers = new Headers(init.headers || {});
+  const headers = new Headers(fetchInit.headers || {});
   if (token) {
     headers.set("Authorization", `Bearer ${token}`);
   }
-  if (init.body && !headers.has("Content-Type")) {
+  if (fetchInit.body && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
-  const resp = await fetch(path, { ...init, headers });
+  const resp = await fetch(path, { ...fetchInit, headers });
   if (!resp.ok) {
     const text = await resp.text();
-    throw new Error(`${resp.status}: ${text}`);
+    const detail = parseApiErrorMessage(resp.status, text);
+    if (resp.status === 401 && !skipUnauthorizedHandler) {
+      clearStoredToken();
+      unauthorizedHandler?.(detail || "Session expired or invalid API token.");
+    }
+    throw new ApiError(resp.status, detail, text);
   }
-  return resp.json() as Promise<T>;
+  return (await resp.json()) as T;
 }
 
 export const api = {
   doctor: () => apiFetch<DoctorResponse>("/api/v1/system/doctor"),
-  listEngagements: () => apiFetch<{ engagements: Engagement[] }>("/api/v1/engagements"),
-  getEngagement: (id: string) => apiFetch<EngagementDetail>(`/api/v1/engagements/${id}`),
-  createEngagement: (payload: unknown) =>
+  listTools: () => apiFetch<{ tools: ToolCatalogItem[] }>("/api/v1/system/tools"),
+  getWsTicket: () => apiFetch<WsTicketResponse>("/api/v1/system/ws-ticket", { method: "POST" }),
+  listEngagements: (opts?: { skipUnauthorizedHandler?: boolean }) =>
+    apiFetch<{ engagements: Engagement[] }>("/api/v1/engagements", opts),
+  getEngagement: (id: string, signal?: AbortSignal) =>
+    apiFetch<EngagementDetail>(`/api/v1/engagements/${id}`, { signal }),
+  createEngagement: (payload: EngagementCreatePayload) =>
     apiFetch<Engagement>("/api/v1/engagements", {
       method: "POST",
       body: JSON.stringify(payload),
@@ -277,15 +442,15 @@ export const api = {
   deleteEngagement: (id: string) =>
     apiFetch<{ deleted: string }>(`/api/v1/engagements/${id}`, { method: "DELETE" }),
   startEngagement: (id: string) =>
-    apiFetch(`/api/v1/engagements/${id}/start`, { method: "POST" }),
+    apiFetch<EngagementActionResponse>(`/api/v1/engagements/${id}/start`, { method: "POST" }),
   pauseEngagement: (id: string) =>
-    apiFetch(`/api/v1/engagements/${id}/pause`, { method: "POST" }),
+    apiFetch<EngagementActionResponse>(`/api/v1/engagements/${id}/pause`, { method: "POST" }),
   resumeEngagement: (id: string) =>
-    apiFetch(`/api/v1/engagements/${id}/resume`, { method: "POST" }),
+    apiFetch<EngagementActionResponse>(`/api/v1/engagements/${id}/resume`, { method: "POST" }),
   stopEngagement: (id: string) =>
-    apiFetch(`/api/v1/engagements/${id}/stop`, { method: "POST" }),
+    apiFetch<EngagementActionResponse>(`/api/v1/engagements/${id}/stop`, { method: "POST" }),
   runManualTool: (id: string, payload: { tool_name: string; target: string; args: Record<string, unknown> }) =>
-    apiFetch(`/api/v1/engagements/${id}/run-tool`, {
+    apiFetch<ManualToolRunResponse>(`/api/v1/engagements/${id}/run-tool`, {
       method: "POST",
       body: JSON.stringify(payload),
     }),
@@ -293,14 +458,21 @@ export const api = {
     apiFetch<{ log: string }>(`/api/v1/engagements/${id}/runs/${runId}/log`),
   decideApproval: (
     approvalId: string,
-    payload: { decision: "approved" | "modified" | "rejected"; modified_args?: Record<string, unknown>; operator_note?: string }
+    payload: {
+      decision: "approved" | "modified" | "rejected";
+      modified_args?: Record<string, unknown>;
+      operator_note?: string;
+    }
   ) =>
-    apiFetch(`/api/v1/approvals/${approvalId}/decide`, {
+    apiFetch<ApprovalDecisionResponse>(`/api/v1/approvals/${approvalId}/decide`, {
       method: "POST",
       body: JSON.stringify(payload),
     }),
-  updateFinding: (findingId: string, payload: { status?: string; severity?: string }) =>
-    apiFetch(`/api/v1/findings/${findingId}`, {
+  updateFinding: (
+    findingId: string,
+    payload: { status?: FindingItem["status"]; severity?: FindingItem["severity"] }
+  ) =>
+    apiFetch<FindingMutationResponse>(`/api/v1/findings/${findingId}`, {
       method: "PATCH",
       body: JSON.stringify(payload),
     }),
@@ -308,7 +480,7 @@ export const api = {
     engagementId: string,
     payload: {
       title: string;
-      severity: string;
+      severity: FindingItem["severity"];
       target_url: string;
       parameter?: string | null;
       cwe_id?: string | null;
@@ -318,12 +490,15 @@ export const api = {
       remediation?: string;
     }
   ) =>
-    apiFetch(`/api/v1/engagements/${engagementId}/findings`, {
+    apiFetch<FindingMutationResponse>(`/api/v1/engagements/${engagementId}/findings`, {
       method: "POST",
       body: JSON.stringify(payload),
     }),
-  updateHypothesis: (hypothesisId: string, payload: { status: string; evidence_note?: string }) =>
-    apiFetch(`/api/v1/hypotheses/${hypothesisId}`, {
+  updateHypothesis: (
+    hypothesisId: string,
+    payload: { status: HypothesisItem["status"]; evidence_note?: string }
+  ) =>
+    apiFetch<HypothesisMutationResponse>(`/api/v1/hypotheses/${hypothesisId}`, {
       method: "PATCH",
       body: JSON.stringify(payload),
     }),
@@ -354,10 +529,18 @@ export const api = {
       body: JSON.stringify(payload),
     }),
   listLLMProfiles: () => apiFetch<{ profiles: LLMProfileItem[] }>("/api/v1/llm-profiles"),
-  createLLMProfile: (payload: unknown) =>
+  createLLMProfile: (payload: LLMProfileCreatePayload) =>
     apiFetch<LLMProfileItem>("/api/v1/llm-profiles", {
       method: "POST",
       body: JSON.stringify(payload),
+    }),
+  deleteLLMProfile: (profileId: string) =>
+    apiFetch<{ deleted: string }>(`/api/v1/llm-profiles/${encodeURIComponent(profileId)}`, {
+      method: "DELETE",
+    }),
+  setDefaultLLMProfile: (profileId: string) =>
+    apiFetch<LLMProfileItem>(`/api/v1/llm-profiles/${encodeURIComponent(profileId)}/default`, {
+      method: "POST",
     }),
   discoverLLMModels: (payload: { provider: string; base_url: string; api_key: string }) =>
     apiFetch<{ reachable: boolean; models: string[]; error?: string }>("/api/v1/llm-profiles/discover", {
@@ -365,10 +548,7 @@ export const api = {
       body: JSON.stringify(payload),
     }),
   reverifyFinding: (findingId: string) =>
-    apiFetch<{ id: string; status: string; still_present: boolean; verified_at: string }>(
-      `/api/v1/findings/${findingId}/reverify`,
-      { method: "POST" }
-    ),
+    apiFetch<ReverifyFindingResponse>(`/api/v1/findings/${findingId}/reverify`, { method: "POST" }),
   steerEngagement: (engagementId: string, hint: string) =>
     apiFetch<{ engagement_id: string; operator_hints: string[] }>(
       `/api/v1/engagements/${engagementId}/steer`,
@@ -382,18 +562,29 @@ export const api = {
       `/api/v1/engagements/${engagementId}/chains/synthesize`,
       { method: "POST" }
     ),
-  downloadReport: async (id: string, format: "html" | "markdown" | "sarif" | "poc_sh") => {
+  downloadReport: async (id: string, format: ReportFormat) => {
     const token = getStoredToken();
-    const resp = await fetch(`/api/v1/engagements/${id}/report?format=${format}`, {
-      headers: { Authorization: `Bearer ${token}` },
+    const endpoint = `/api/v1/engagements/${id}/report?format=${format}`;
+    const resp = await fetch(endpoint, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
     });
-    if (!resp.ok) throw new Error("Report export failed");
+    if (!resp.ok) {
+      const text = await resp.text();
+      const detail = parseApiErrorMessage(resp.status, text);
+      if (resp.status === 401) {
+        clearStoredToken();
+        unauthorizedHandler?.(detail || "Session expired or invalid API token.");
+      }
+      throw new ApiError(resp.status, detail, text);
+    }
     const blob = await resp.blob();
     const ext =
       format === "markdown"
         ? "md"
         : format === "sarif"
         ? "sarif.json"
+        : format === "json"
+        ? "json"
         : format === "poc_sh"
         ? "poc.sh"
         : "html";
@@ -402,26 +593,153 @@ export const api = {
     a.href = url;
     a.download = `aegispt-report-${id}.${ext}`;
     a.click();
-    URL.revokeObjectURL(url);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
   },
 };
 
-export function createEngagementWebSocket(
+export function buildEngagementWsUrl(
+  protocol: string,
+  host: string,
   engagementId: string,
-  onEvent: (ev: AgentEventItem) => void
-): WebSocket {
-  const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-  const tok = encodeURIComponent(getStoredToken());
-  const ws = new WebSocket(`${proto}//${window.location.host}/ws/engagements/${engagementId}?token=${tok}`);
-  ws.onmessage = (msg) => {
-    try {
-      const parsed = JSON.parse(msg.data) as AgentEventItem;
-      if (parsed.event_type !== "pong") {
-        onEvent(parsed);
-      }
-    } catch {
-      // ignore malformed frames
+  ticket: string
+): string {
+  const wsProto = protocol === "https:" ? "wss:" : "ws:";
+  return `${wsProto}//${host}/api/v1/engagements/${encodeURIComponent(engagementId)}/ws?ticket=${encodeURIComponent(ticket)}`;
+}
+
+export interface WsConnectionHandlers {
+  onEvent: (ev: AgentEventItem) => void;
+  onStatusChange?: (connected: boolean) => void;
+  onUnauthorized?: (reason: string) => void;
+}
+
+export interface WsConnectionOptions {
+  heartbeatMs?: number;
+  initialRetryMs?: number;
+  maxRetryMs?: number;
+  requestTicket?: () => Promise<WsTicketResponse>;
+  createSocket?: (url: string) => WebSocket;
+  getLocation?: () => { protocol: string; host: string };
+}
+
+export function connectEngagementWS(
+  engagementId: string,
+  handlers: WsConnectionHandlers,
+  options: WsConnectionOptions = {}
+): { close: () => void } {
+  const heartbeatMs = options.heartbeatMs ?? 25_000;
+  const initialRetryMs = options.initialRetryMs ?? 1_000;
+  const maxRetryMs = options.maxRetryMs ?? 12_000;
+  const requestTicket = options.requestTicket ?? api.getWsTicket;
+  const createSocket = options.createSocket ?? ((url: string) => new WebSocket(url));
+  const getLocation =
+    options.getLocation ?? (() => ({ protocol: window.location.protocol, host: window.location.host }));
+
+  let disposed = false;
+  let retryDelay = initialRetryMs;
+  let retryTimer: ReturnType<typeof setTimeout> | undefined;
+  let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
+  let activeWs: WebSocket | null = null;
+
+  const clearTimers = () => {
+    if (retryTimer !== undefined) {
+      clearTimeout(retryTimer);
+      retryTimer = undefined;
+    }
+    if (heartbeatTimer !== undefined) {
+      clearInterval(heartbeatTimer);
+      heartbeatTimer = undefined;
     }
   };
-  return ws;
+
+  const scheduleReconnect = () => {
+    if (disposed) return;
+    retryTimer = setTimeout(() => {
+      void connect();
+    }, retryDelay);
+    retryDelay = Math.min(retryDelay * 2, maxRetryMs);
+  };
+
+  const connect = async () => {
+    if (disposed) return;
+    let ticket: string;
+    try {
+      const res = await requestTicket();
+      ticket = res.ticket;
+    } catch (err) {
+      handlers.onStatusChange?.(false);
+      if (err instanceof ApiError && err.status === 401) {
+        disposed = true;
+        handlers.onUnauthorized?.(err.detail || "Authentication expired.");
+        return;
+      }
+      scheduleReconnect();
+      return;
+    }
+
+    if (disposed) return;
+    const loc = getLocation();
+    const url = buildEngagementWsUrl(loc.protocol, loc.host, engagementId, ticket);
+    const ws = createSocket(url);
+    activeWs = ws;
+
+    ws.onopen = () => {
+      if (disposed) {
+        ws.close();
+        return;
+      }
+      retryDelay = initialRetryMs;
+      handlers.onStatusChange?.(true);
+      if (heartbeatTimer !== undefined) clearInterval(heartbeatTimer);
+      heartbeatTimer = setInterval(() => {
+        if (ws.readyState === 1) {
+          ws.send("ping");
+        }
+      }, heartbeatMs);
+    };
+
+    ws.onmessage = (msg) => {
+      try {
+        const parsed = JSON.parse(String(msg.data)) as AgentEventItem;
+        if (parsed && parsed.event_type !== "pong") {
+          handlers.onEvent(parsed);
+        }
+      } catch {
+        // ignore malformed frames
+      }
+    };
+
+    ws.onclose = (closeEvent) => {
+      if (heartbeatTimer !== undefined) {
+        clearInterval(heartbeatTimer);
+        heartbeatTimer = undefined;
+      }
+      handlers.onStatusChange?.(false);
+      if (disposed) return;
+
+      if (closeEvent.code === 4401) {
+        disposed = true;
+        clearStoredToken();
+        const reason = "WebSocket authentication failed (4401). Please sign in again.";
+        handlers.onUnauthorized?.(reason);
+        unauthorizedHandler?.(reason);
+        return;
+      }
+
+      scheduleReconnect();
+    };
+  };
+
+  void connect();
+
+  return {
+    close: () => {
+      disposed = true;
+      clearTimers();
+      if (activeWs) {
+        activeWs.close();
+        activeWs = null;
+      }
+    },
+  };
 }

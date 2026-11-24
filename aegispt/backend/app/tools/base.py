@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import os
 import re
 import shutil
+import signal
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -167,6 +169,51 @@ class BaseToolAdapter(ABC):
         env["NO_COLOR"] = "1"
         return env
 
+    async def pre_execute(
+        self,
+        *,
+        engagement_id: str,
+        tool_run_id: str,
+        target: str,
+        args: BaseModel,
+        scope: ScopePolicy,
+        work_dir: Path,
+    ) -> dict[str, Any]:
+        """Optional async setup hook executed before subprocess/native invocation."""
+        return {}
+
+    async def post_execute(
+        self,
+        *,
+        engagement_id: str,
+        tool_run_id: str,
+        target: str,
+        args: BaseModel,
+        scope: ScopePolicy,
+        work_dir: Path,
+        context: dict[str, Any],
+        result: ToolResult | None,
+    ) -> None:
+        """Optional async cleanup/enrichment hook always executed in a finally block."""
+        return None
+
+    @staticmethod
+    def _terminate_process_group(proc: asyncio.subprocess.Process) -> None:
+        """Terminate a subprocess and its entire process group safely."""
+        if proc.returncode is not None:
+            return
+        if hasattr(os, "killpg") and proc.pid:
+            try:
+                pgid = os.getpgid(proc.pid)
+                os.killpg(pgid, signal.SIGKILL)
+                return
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+
     async def execute(
         self,
         *,
@@ -185,8 +232,10 @@ class BaseToolAdapter(ABC):
         log_path = run_dir / f"{self.name}.log"
 
         start = time.monotonic()
-        if self.binary_name is None:
-            result = await self.execute_native(
+        context: dict[str, Any] = {}
+        final_result: ToolResult | None = None
+        try:
+            context = await self.pre_execute(
                 engagement_id=engagement_id,
                 tool_run_id=tool_run_id,
                 target=norm_target,
@@ -194,102 +243,136 @@ class BaseToolAdapter(ABC):
                 scope=scope,
                 work_dir=run_dir,
             )
-            result.duration_ms = int((time.monotonic() - start) * 1000)
-            scrubbed = SecretRedactor().redact(result.stdout or "")
-            log_path.write_text(scrubbed, encoding="utf-8", errors="replace")
-            result.raw_log_path = str(log_path)
-            return result
 
-        argv = sanitize_argv(self.build_argv(norm_target, args, scope, run_dir))
-        timeout = min(
-            int(getattr(args, "timeout_seconds", self.default_timeout) or self.default_timeout),
-            settings.default_tool_timeout * 2,
-        )
+            if self.binary_name is None:
+                result = await self.execute_native(
+                    engagement_id=engagement_id,
+                    tool_run_id=tool_run_id,
+                    target=norm_target,
+                    args=args,
+                    scope=scope,
+                    work_dir=run_dir,
+                )
+                result.duration_ms = int((time.monotonic() - start) * 1000)
+                scrubbed = SecretRedactor().redact(result.stdout or "")
+                log_path.write_text(scrubbed, encoding="utf-8", errors="replace")
+                result.raw_log_path = str(log_path)
+                final_result = result
+                return result
 
-        proc = await asyncio.create_subprocess_exec(
-            *argv,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=str(run_dir),
-            env=self._subprocess_env(),
-        )
-
-        stdout_chunks: list[bytes] = []
-        stderr_chunks: list[bytes] = []
-        max_bytes = settings.max_output_bytes
-        total_bytes = 0
-        line_count = 0
-
-        async def _read_stream(stream: asyncio.StreamReader | None, sink: list[bytes], label: str) -> None:
-            nonlocal total_bytes, line_count
-            if stream is None:
-                return
-            while True:
-                line = await stream.readline()
-                if not line:
-                    break
-                if total_bytes < max_bytes:
-                    sink.append(line)
-                    total_bytes += len(line)
-                line_count += 1
-                if line_count <= 200 or line_count % 25 == 0:
-                    text_line = line.decode("utf-8", errors="replace").rstrip()
-                    if text_line:
-                        await event_bus.publish(
-                            engagement_id=engagement_id,
-                            event_type="tool_output",
-                            agent_name=self.name,
-                            message=text_line[:500],
-                            payload={"tool_run_id": tool_run_id, "stream": label},
-                            persist=False,
-                        )
-
-        timed_out = False
-        try:
-            await asyncio.wait_for(
-                asyncio.gather(
-                    _read_stream(proc.stdout, stdout_chunks, "stdout"),
-                    _read_stream(proc.stderr, stderr_chunks, "stderr"),
-                    proc.wait(),
-                ),
-                timeout=timeout,
+            argv = sanitize_argv(self.build_argv(norm_target, args, scope, run_dir))
+            timeout = min(
+                int(getattr(args, "timeout_seconds", self.default_timeout) or self.default_timeout),
+                settings.default_tool_timeout * 2,
             )
-        except asyncio.TimeoutError:
-            timed_out = True
+
+            proc = await asyncio.create_subprocess_exec(
+                *argv,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=str(run_dir),
+                env=self._subprocess_env(),
+                start_new_session=True,
+            )
+
+            stdout_chunks: list[bytes] = []
+            stderr_chunks: list[bytes] = []
+            max_bytes = settings.max_output_bytes
+            total_bytes = 0
+            line_count = 0
+
+            async def _read_stream(stream: asyncio.StreamReader | None, sink: list[bytes], label: str) -> None:
+                nonlocal total_bytes, line_count
+                if stream is None:
+                    return
+                while True:
+                    line = await stream.readline()
+                    if not line:
+                        break
+                    if total_bytes < max_bytes:
+                        sink.append(line)
+                        total_bytes += len(line)
+                    line_count += 1
+                    if line_count <= 200 or line_count % 25 == 0:
+                        text_line = line.decode("utf-8", errors="replace").rstrip()
+                        if text_line:
+                            await event_bus.publish(
+                                engagement_id=engagement_id,
+                                event_type="tool_output",
+                                agent_name=self.name,
+                                message=text_line[:500],
+                                payload={"tool_run_id": tool_run_id, "stream": label},
+                                persist=False,
+                            )
+
+            timed_out = False
             try:
-                proc.kill()
-                await proc.wait()
-            except ProcessLookupError:
-                pass
+                await asyncio.wait_for(
+                    asyncio.gather(
+                        _read_stream(proc.stdout, stdout_chunks, "stdout"),
+                        _read_stream(proc.stderr, stderr_chunks, "stderr"),
+                        proc.wait(),
+                    ),
+                    timeout=timeout,
+                )
+            except asyncio.TimeoutError:
+                timed_out = True
+                self._terminate_process_group(proc)
+                try:
+                    await proc.wait()
+                except ProcessLookupError:
+                    pass
+            except asyncio.CancelledError:
+                self._terminate_process_group(proc)
+                try:
+                    await proc.wait()
+                except ProcessLookupError:
+                    pass
+                raise
 
-        duration_ms = int((time.monotonic() - start) * 1000)
-        stdout_str = b"".join(stdout_chunks).decode("utf-8", errors="replace")
-        stderr_str = b"".join(stderr_chunks).decode("utf-8", errors="replace")
-        redactor = SecretRedactor()
-        safe_argv = redactor.redact(" ".join(argv))
-        safe_stdout = redactor.redact(stdout_str)
-        safe_stderr = redactor.redact(stderr_str)
-        log_path.write_text(
-            f"# ARGV: {safe_argv}\n\n# STDOUT\n{safe_stdout}\n\n# STDERR\n{safe_stderr}\n",
-            encoding="utf-8",
-            errors="replace",
-        )
+            duration_ms = int((time.monotonic() - start) * 1000)
+            stdout_str = b"".join(stdout_chunks).decode("utf-8", errors="replace")
+            stderr_str = b"".join(stderr_chunks).decode("utf-8", errors="replace")
+            redactor = SecretRedactor()
+            safe_argv = redactor.redact(" ".join(argv))
+            safe_stdout = redactor.redact(stdout_str)
+            safe_stderr = redactor.redact(stderr_str)
+            log_path.write_text(
+                f"# ARGV: {safe_argv}\n\n# STDOUT\n{safe_stdout}\n\n# STDERR\n{safe_stderr}\n",
+                encoding="utf-8",
+                errors="replace",
+            )
 
-        parsed = self.parse_output(
-            target=norm_target,
-            args=args,
-            stdout=stdout_str,
-            stderr=stderr_str,
-            work_dir=run_dir,
-        )
-        parsed.exit_code = proc.returncode if proc.returncode is not None else -1
-        parsed.duration_ms = duration_ms
-        parsed.stdout = stdout_str
-        parsed.stderr = stderr_str
-        parsed.raw_log_path = str(log_path)
-        if timed_out:
-            parsed.error = f"Tool timed out after {timeout}s (partial results preserved)."
-        return parsed
+            parse_kwargs: dict[str, Any] = {
+                "target": norm_target,
+                "args": args,
+                "stdout": stdout_str,
+                "stderr": stderr_str,
+                "work_dir": run_dir,
+            }
+            if "scope" in inspect.signature(self.parse_output).parameters:
+                parse_kwargs["scope"] = scope
+            parsed = self.parse_output(**parse_kwargs)
+            parsed.exit_code = proc.returncode if proc.returncode is not None else -1
+            parsed.duration_ms = duration_ms
+            parsed.stdout = stdout_str
+            parsed.stderr = stderr_str
+            parsed.raw_log_path = str(log_path)
+            if timed_out:
+                parsed.error = f"Tool timed out after {timeout}s (partial results preserved)."
+            final_result = parsed
+            return parsed
+        finally:
+            await self.post_execute(
+                engagement_id=engagement_id,
+                tool_run_id=tool_run_id,
+                target=norm_target,
+                args=args,
+                scope=scope,
+                work_dir=run_dir,
+                context=context,
+                result=final_result,
+            )
 
     async def execute_native(
         self,

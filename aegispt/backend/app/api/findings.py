@@ -89,6 +89,21 @@ async def reverify_finding(
     finding = await db.get(Finding, finding_id)
     if not finding:
         raise HTTPException(status_code=404, detail="Finding not found.")
+
+    if finding.tool_source != "http_probe":
+        return {
+            "id": finding.id,
+            "finding_id": finding.id,
+            "status": finding.status,
+            "still_present": None,
+            "manual_reverify_required": True,
+            "verified_at": finding.verified_at.isoformat() if getattr(finding, "verified_at", None) else None,
+            "message": (
+                f"Automated reverification is not supported for '{finding.tool_source}' findings. "
+                f"Re-run '{finding.tool_source}' or verify manually to avoid false remediation."
+            ),
+        }
+
     scope_row = (
         await db.execute(
             select(ScopePolicyModel).where(ScopePolicyModel.engagement_id == finding.engagement_id)
@@ -103,17 +118,25 @@ async def reverify_finding(
     tl = finding.title.lower()
     if "graphql" in tl:
         mode = "graphql_deep_audit"
+    elif "oauth" in tl:
+        mode = "oauth_audit"
     elif "redirect" in tl:
         mode = "open_redirect_probe"
     elif "bola" in tl or "authorization" in tl:
         mode = "differential_bola"
+    elif "verb tampering" in tl or "bfla" in tl:
+        mode = "bfla_verb_tamper"
+    elif "race" in tl or "concurrency" in tl:
+        mode = "race_burst_probe"
     elif "ssti" in tl or "template injection" in tl:
         mode = "ssti_probe"
-    elif "jwt" in tl and "bypass" in tl:
+    elif "jwt" in tl and ("bypass" in tl or "weak" in tl or "alg" in tl):
         mode = "jwt_active_probe"
+    elif "hpp" in tl or "content-type" in tl:
+        mode = "hpp_and_content_switch"
 
     try:
-        norm_url = scope.validate_target(finding.target_url)
+        norm_url = await scope.validate_target_async(finding.target_url)
     except ScopeViolationError as exc:
         raise HTTPException(status_code=403, detail=f"Scope blocked reverification: {exc}")
 
@@ -134,9 +157,16 @@ async def reverify_finding(
     await db.commit()
     return {
         "id": finding.id,
+        "finding_id": finding.id,
         "status": finding.status,
         "still_present": still_present,
+        "manual_reverify_required": False,
         "verified_at": finding.verified_at.isoformat(),
+        "message": (
+            "Finding is still reproducible."
+            if still_present
+            else "Finding was not reproduced and has been marked remediated."
+        ),
     }
 
 

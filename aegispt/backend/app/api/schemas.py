@@ -4,6 +4,8 @@ from __future__ import annotations
 from typing import Any, Literal
 from pydantic import BaseModel, Field
 
+from app.config import get_settings
+
 
 class ScopePolicyInput(BaseModel):
     allowed_domains: list[str] = Field(default_factory=list)
@@ -30,7 +32,7 @@ class EngagementCreate(BaseModel):
     objective: str = "Comprehensive Web Application & API Security Assessment"
     autonomy_mode: Literal["tiered", "copilot", "lab_autopilot"] = "tiered"
     tier2_auto: bool = True
-    max_steps: int = Field(default=20, ge=1, le=60)
+    max_steps: int = Field(default_factory=lambda: get_settings().default_max_steps, ge=1, le=60)
     llm_profile_id: str | None = None
     scope: ScopePolicyInput
 

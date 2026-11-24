@@ -74,14 +74,15 @@ class EventBus:
             self._global_subscribers
         )
         for q in targets:
-            try:
-                q.put_nowait(wire)
-            except asyncio.QueueFull:
+            for _ in range(3):
                 try:
-                    q.get_nowait()
                     q.put_nowait(wire)
-                except asyncio.QueueEmpty:
-                    pass
+                    break
+                except asyncio.QueueFull:
+                    try:
+                        q.get_nowait()
+                    except asyncio.QueueEmpty:
+                        pass
 
         return wire
 

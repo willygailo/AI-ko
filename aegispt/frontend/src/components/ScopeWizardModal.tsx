@@ -1,6 +1,8 @@
-import React, { useState } from "react";
-import { Plus, X, Lock } from "lucide-react";
-import { LLMProfileItem, api } from "../api/client";
+import React, { useId, useState } from "react";
+import { FlaskConical, Lock, Plus } from "lucide-react";
+import { type LLMProfileItem, api } from "../api/client";
+import { parseKVLines, splitLines } from "../utils/parsing";
+import { ModalFrame } from "./ModalFrame";
 
 interface Props {
   profiles: LLMProfileItem[];
@@ -9,10 +11,16 @@ interface Props {
 }
 
 export const ScopeWizardModal: React.FC<Props> = ({ profiles, onCreated, onClose }) => {
-  const [name, setName] = useState("Local Juice Shop Assessment");
+  const formId = useId();
+  const idPrefix = useId();
+  const defaultProfileId = profiles.find((p) => p.is_default)?.id ?? "";
+
+  const [name, setName] = useState("");
   const [objective, setObjective] = useState("Comprehensive Web Application & API Security Assessment");
-  const [urlsText, setUrlsText] = useState("http://127.0.0.1:3000");
+  const [urlsText, setUrlsText] = useState("");
   const [domainsText, setDomainsText] = useState("");
+  const [cidrsText, setCidrsText] = useState("");
+  const [excludedHostsText, setExcludedHostsText] = useState("");
   const [excludedPathsText, setExcludedPathsText] = useState("/logout\n/billing");
   const [headersText, setHeadersText] = useState("");
   const [cookiesText, setCookiesText] = useState("");
@@ -21,267 +29,376 @@ export const ScopeWizardModal: React.FC<Props> = ({ profiles, onCreated, onClose
   const [showAuthVault, setShowAuthVault] = useState(false);
   const [mode, setMode] = useState<"tiered" | "copilot" | "lab_autopilot">("tiered");
   const [tier2Auto, setTier2Auto] = useState(true);
-  const [allowPrivateIps, setAllowPrivateIps] = useState(true);
+  const [allowPrivateIps, setAllowPrivateIps] = useState(false);
   const [maxRps, setMaxRps] = useState(15);
-  const [llmProfileId, setLlmProfileId] = useState<string>(profiles[0]?.id || "");
+  const [maxSteps, setMaxSteps] = useState(20);
+  const [llmProfileId, setLlmProfileId] = useState<string>(defaultProfileId);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
-  const splitLines = (txt: string) =>
-    txt
-      .split(/[\n,]+/)
-      .map((s) => s.trim())
-      .filter(Boolean);
-
-  const parseKVLines = (txt: string, sep: ":" | "=") => {
-    const out: Record<string, string> = {};
-    for (const raw of txt.split("\n")) {
-      const line = raw.trim();
-      if (!line) continue;
-      const idx = line.indexOf(sep);
-      if (idx > 0) {
-        out[line.slice(0, idx).trim()] = line.slice(idx + 1).trim();
-      }
-    }
-    return out;
+  const loadJuiceShopPreset = () => {
+    setName("Local Juice Shop Assessment");
+    setObjective("Comprehensive Web Application & API Security Assessment");
+    setUrlsText("http://127.0.0.1:3000");
+    setDomainsText("");
+    setCidrsText("");
+    setExcludedHostsText("");
+    setExcludedPathsText("/logout\n/billing");
+    setMode("tiered");
+    setTier2Auto(true);
+    setAllowPrivateIps(true);
+    setMaxRps(15);
+    setMaxSteps(20);
+    setError("");
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
+    const allowedUrls = splitLines(urlsText);
+    const allowedDomains = splitLines(domainsText);
+    const allowedCidrs = splitLines(cidrsText);
+    if (allowedUrls.length === 0 && allowedDomains.length === 0 && allowedCidrs.length === 0) {
+      setError("Provide at least one allowlisted URL, domain, or CIDR block.");
+      return;
+    }
+
     setLoading(true);
     try {
       const created = await api.createEngagement({
-        name,
-        objective,
+        name: name.trim(),
+        objective: objective.trim(),
         autonomy_mode: mode,
         tier2_auto: tier2Auto,
-        max_steps: 20,
+        max_steps: Math.min(60, Math.max(1, Math.round(maxSteps) || 20)),
         llm_profile_id: llmProfileId || null,
         scope: {
-          allowed_urls: splitLines(urlsText),
-          allowed_domains: splitLines(domainsText),
+          allowed_urls: allowedUrls,
+          allowed_domains: allowedDomains,
+          allowed_cidrs: allowedCidrs,
+          excluded_hosts: splitLines(excludedHostsText),
           excluded_paths: splitLines(excludedPathsText),
           custom_headers: parseKVLines(headersText, ":"),
           auth_cookies: parseKVLines(cookiesText, "="),
           secondary_headers: parseKVLines(secHeadersText, ":"),
           secondary_cookies: parseKVLines(secCookiesText, "="),
-          max_rps: maxRps,
+          max_rps: Math.min(100, Math.max(1, Math.round(maxRps) || 15)),
           allow_private_ips: allowPrivateIps,
         },
       });
       await onCreated(created.id);
       onClose();
     } catch (err) {
-      setError(String(err));
+      setError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4">
-      <form
-        onSubmit={handleSubmit}
-        className="w-full max-w-xl bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl overflow-hidden"
-      >
-        <div className="flex items-center justify-between px-5 py-4 border-b border-slate-800">
-          <h2 className="text-sm font-bold text-white flex items-center gap-2">
-            <Plus className="w-4 h-4 text-cyan-400" /> New Scoped Engagement
-          </h2>
-          <button type="button" onClick={onClose} className="text-slate-400 hover:text-white">
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-
-        <div className="p-5 space-y-3.5 text-xs max-h-[75vh] overflow-y-auto">
-          <div>
-            <label className="block text-slate-300 font-medium mb-1">Engagement Name</label>
-            <input
-              required
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-white"
-            />
-          </div>
-
-          <div>
-            <label className="block text-slate-300 font-medium mb-1">Assessment Objective</label>
-            <input
-              value={objective}
-              onChange={(e) => setObjective(e.target.value)}
-              className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-white"
-            />
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            <div>
-              <label className="block text-slate-300 font-medium mb-1">Allowlisted URLs</label>
-              <textarea
-                rows={3}
-                value={urlsText}
-                onChange={(e) => setUrlsText(e.target.value)}
-                placeholder="https://staging.example.com"
-                className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 font-mono text-cyan-300"
-              />
-            </div>
-            <div>
-              <label className="block text-slate-300 font-medium mb-1">Allowlisted Domains (optional)</label>
-              <textarea
-                rows={3}
-                value={domainsText}
-                onChange={(e) => setDomainsText(e.target.value)}
-                placeholder="*.staging.example.com"
-                className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 font-mono text-cyan-300"
-              />
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            <div>
-              <label className="block text-slate-300 font-medium mb-1">Excluded Paths</label>
-              <textarea
-                rows={2}
-                value={excludedPathsText}
-                onChange={(e) => setExcludedPathsText(e.target.value)}
-                className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 font-mono text-slate-300"
-              />
-            </div>
-            <div className="space-y-2">
-              <label className="block text-slate-300 font-medium">Autonomy Mode</label>
-              <select
-                value={mode}
-                onChange={(e) => setMode(e.target.value as typeof mode)}
-                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-white"
-              >
-                <option value="tiered">Tiered Autonomy (Recommended)</option>
-                <option value="copilot">Interactive Copilot (Approve Every Tool)</option>
-                <option value="lab_autopilot">Isolated Lab Autopilot (Unattended)</option>
-              </select>
-              <div className="flex items-center gap-3 pt-1">
-                <label className="flex items-center gap-1.5 text-slate-300">
-                  <input
-                    type="checkbox"
-                    checked={allowPrivateIps}
-                    onChange={(e) => setAllowPrivateIps(e.target.checked)}
-                  />
-                  Allow Private / Localhost IPs
-                </label>
-              </div>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="block text-slate-300 font-medium mb-1">Max RPS</label>
-              <input
-                type="number"
-                min={1}
-                max={100}
-                value={maxRps}
-                onChange={(e) => setMaxRps(Number(e.target.value))}
-                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-white"
-              />
-            </div>
-            <div>
-              <label className="block text-slate-300 font-medium mb-1">LLM Profile</label>
-              <select
-                value={llmProfileId}
-                onChange={(e) => setLlmProfileId(e.target.value)}
-                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-white"
-              >
-                <option value="">Default Settings</option>
-                {profiles.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name} ({p.reasoning_model})
-                  </option>
-                ))}
-              </select>
-            </div>
-          </div>
-
-          <div className="border border-slate-800 rounded-xl bg-slate-950/60">
-            <button
-              type="button"
-              onClick={() => setShowAuthVault(!showAuthVault)}
-              className="w-full flex items-center justify-between px-3 py-2 text-slate-300 hover:text-white font-medium"
-            >
-              <span className="flex items-center gap-1.5">
-                <Lock className="w-3.5 h-3.5 text-cyan-400" /> Auth Headers & Session Cookies (Optional)
-              </span>
-              <span className="text-[11px] text-slate-500">{showAuthVault ? "Hide" : "Configure"}</span>
-            </button>
-            {showAuthVault && (
-              <div className="p-3 pt-1 grid grid-cols-1 md:grid-cols-2 gap-3 border-t border-slate-800">
-                <div>
-                  <label className="block text-slate-400 mb-1">Headers (Key: Value per line)</label>
-                  <textarea
-                    rows={3}
-                    value={headersText}
-                    onChange={(e) => setHeadersText(e.target.value)}
-                    placeholder="Authorization: Bearer eyJ..."
-                    className="w-full bg-slate-950 border border-slate-800 rounded p-2 font-mono text-[11px] text-slate-200"
-                  />
-                </div>
-                <div>
-                  <label className="block text-slate-400 mb-1">Cookies (name=value per line)</label>
-                  <textarea
-                    rows={3}
-                    value={cookiesText}
-                    onChange={(e) => setCookiesText(e.target.value)}
-                    placeholder="session_id=abc123"
-                    className="w-full bg-slate-950 border border-slate-800 rounded p-2 font-mono text-[11px] text-slate-200"
-                  />
-                </div>
-                <div>
-                  <label className="block text-slate-400 mb-1">Secondary User/Role Headers (BOLA/IDOR)</label>
-                  <textarea
-                    rows={2}
-                    value={secHeadersText}
-                    onChange={(e) => setSecHeadersText(e.target.value)}
-                    placeholder="Authorization: Bearer userB_jwt"
-                    className="w-full bg-slate-950 border border-slate-800 rounded p-2 font-mono text-[11px] text-slate-200"
-                  />
-                </div>
-                <div>
-                  <label className="block text-slate-400 mb-1">Secondary User/Role Cookies</label>
-                  <textarea
-                    rows={2}
-                    value={secCookiesText}
-                    onChange={(e) => setSecCookiesText(e.target.value)}
-                    placeholder="session_id=userB_cookie"
-                    className="w-full bg-slate-950 border border-slate-800 rounded p-2 font-mono text-[11px] text-slate-200"
-                  />
-                </div>
-              </div>
-            )}
-          </div>
-
-          <label className="flex items-center gap-2 text-slate-300">
-            <input
-              type="checkbox"
-              checked={tier2Auto}
-              onChange={(e) => setTier2Auto(e.target.checked)}
-            />
-            Auto-approve bounded Tier 2 scans (ffuf, arjun, safe nuclei, nmap); always gate Tier 3
-          </label>
-
-          {error && <div className="text-red-400 bg-red-950/40 border border-red-800 rounded p-2">{error}</div>}
-        </div>
-
-        <div className="flex justify-end gap-2 px-5 py-3.5 bg-slate-950 border-t border-slate-800">
-          <button type="button" onClick={onClose} className="px-3.5 py-2 text-xs text-slate-400 hover:text-white">
+    <ModalFrame
+      title={
+        <>
+          <Plus className="w-4 h-4 text-cyan-400" aria-hidden="true" />
+          <span>New Scoped Engagement</span>
+        </>
+      }
+      onClose={onClose}
+      disableClose={loading}
+      maxWidthClass="max-w-2xl"
+      headerExtra={
+        <button
+          type="button"
+          onClick={loadJuiceShopPreset}
+          className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-[11px] font-medium text-cyan-300 focus:outline-none focus:ring-2 focus:ring-cyan-500"
+        >
+          <FlaskConical className="w-3.5 h-3.5" aria-hidden="true" />
+          Load Juice Shop Lab Preset
+        </button>
+      }
+      footer={
+        <>
+          <button
+            type="button"
+            disabled={loading}
+            onClick={onClose}
+            className="px-3.5 py-2 rounded-lg text-xs text-slate-400 hover:text-white focus:outline-none focus:ring-2 focus:ring-cyan-500"
+          >
             Cancel
           </button>
           <button
+            form={formId}
             disabled={loading}
             type="submit"
-            className="px-4 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-semibold"
+            className="px-4 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-white text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-cyan-400"
           >
             {loading ? "Creating..." : "Create Engagement"}
           </button>
+        </>
+      }
+    >
+      <form id={formId} onSubmit={(e) => void handleSubmit(e)} className="p-5 space-y-3.5 text-xs">
+        <div>
+          <label htmlFor={`${idPrefix}-name`} className="block text-slate-300 font-medium mb-1">
+            Engagement Name
+          </label>
+          <input
+            id={`${idPrefix}-name`}
+            required
+            minLength={2}
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="e.g. Staging API Security Assessment"
+            className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-white focus:outline-none focus:ring-2 focus:ring-cyan-500"
+          />
         </div>
+
+        <div>
+          <label htmlFor={`${idPrefix}-objective`} className="block text-slate-300 font-medium mb-1">
+            Assessment Objective
+          </label>
+          <input
+            id={`${idPrefix}-objective`}
+            value={objective}
+            onChange={(e) => setObjective(e.target.value)}
+            placeholder="Comprehensive Web Application & API Security Assessment"
+            className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-white focus:outline-none focus:ring-2 focus:ring-cyan-500"
+          />
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div>
+            <label htmlFor={`${idPrefix}-urls`} className="block text-slate-300 font-medium mb-1">
+              Allowlisted URLs
+            </label>
+            <textarea
+              id={`${idPrefix}-urls`}
+              rows={2}
+              value={urlsText}
+              onChange={(e) => setUrlsText(e.target.value)}
+              placeholder="https://staging.example.com&#10;http://127.0.0.1:3000"
+              className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 font-mono text-cyan-300 focus:outline-none focus:ring-2 focus:ring-cyan-500"
+            />
+          </div>
+          <div>
+            <label htmlFor={`${idPrefix}-domains`} className="block text-slate-300 font-medium mb-1">
+              Allowlisted Domains (optional)
+            </label>
+            <textarea
+              id={`${idPrefix}-domains`}
+              rows={2}
+              value={domainsText}
+              onChange={(e) => setDomainsText(e.target.value)}
+              placeholder="*.staging.example.com"
+              className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 font-mono text-cyan-300 focus:outline-none focus:ring-2 focus:ring-cyan-500"
+            />
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div>
+            <label htmlFor={`${idPrefix}-cidrs`} className="block text-slate-300 font-medium mb-1">
+              Allowlisted CIDRs (optional)
+            </label>
+            <textarea
+              id={`${idPrefix}-cidrs`}
+              rows={2}
+              value={cidrsText}
+              onChange={(e) => setCidrsText(e.target.value)}
+              placeholder="10.10.0.0/24"
+              className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 font-mono text-slate-300 focus:outline-none focus:ring-2 focus:ring-cyan-500"
+            />
+          </div>
+          <div>
+            <label htmlFor={`${idPrefix}-excluded-hosts`} className="block text-slate-300 font-medium mb-1">
+              Excluded Hosts (optional)
+            </label>
+            <textarea
+              id={`${idPrefix}-excluded-hosts`}
+              rows={2}
+              value={excludedHostsText}
+              onChange={(e) => setExcludedHostsText(e.target.value)}
+              placeholder="prod.example.com&#10;payments.staging.example.com"
+              className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 font-mono text-slate-300 focus:outline-none focus:ring-2 focus:ring-cyan-500"
+            />
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div>
+            <label htmlFor={`${idPrefix}-excluded-paths`} className="block text-slate-300 font-medium mb-1">
+              Excluded Paths
+            </label>
+            <textarea
+              id={`${idPrefix}-excluded-paths`}
+              rows={2}
+              value={excludedPathsText}
+              onChange={(e) => setExcludedPathsText(e.target.value)}
+              placeholder="/logout&#10;/billing"
+              className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 font-mono text-slate-300 focus:outline-none focus:ring-2 focus:ring-cyan-500"
+            />
+          </div>
+          <div className="space-y-2">
+            <label htmlFor={`${idPrefix}-mode`} className="block text-slate-300 font-medium">
+              Autonomy Mode
+            </label>
+            <select
+              id={`${idPrefix}-mode`}
+              value={mode}
+              onChange={(e) => setMode(e.target.value as typeof mode)}
+              className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-white focus:outline-none focus:ring-2 focus:ring-cyan-500"
+            >
+              <option value="tiered">Tiered Autonomy (Recommended)</option>
+              <option value="copilot">Interactive Copilot (Approve Every Tool)</option>
+              <option value="lab_autopilot">Isolated Lab Autopilot (Unattended)</option>
+            </select>
+            <div className="flex items-center gap-3 pt-1">
+              <label className="flex items-center gap-1.5 text-slate-300 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={allowPrivateIps}
+                  onChange={(e) => setAllowPrivateIps(e.target.checked)}
+                />
+                Allow Private / Localhost IPs
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <div>
+            <label htmlFor={`${idPrefix}-max-rps`} className="block text-slate-300 font-medium mb-1">
+              Max RPS
+            </label>
+            <input
+              id={`${idPrefix}-max-rps`}
+              type="number"
+              min={1}
+              max={100}
+              value={maxRps}
+              onChange={(e) => setMaxRps(Number(e.target.value))}
+              className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-white focus:outline-none focus:ring-2 focus:ring-cyan-500"
+            />
+          </div>
+          <div>
+            <label htmlFor={`${idPrefix}-max-steps`} className="block text-slate-300 font-medium mb-1">
+              Max Steps (1–60)
+            </label>
+            <input
+              id={`${idPrefix}-max-steps`}
+              type="number"
+              min={1}
+              max={60}
+              value={maxSteps}
+              onChange={(e) => setMaxSteps(Number(e.target.value))}
+              className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-white focus:outline-none focus:ring-2 focus:ring-cyan-500"
+            />
+          </div>
+          <div>
+            <label htmlFor={`${idPrefix}-llm`} className="block text-slate-300 font-medium mb-1">
+              LLM Profile
+            </label>
+            <select
+              id={`${idPrefix}-llm`}
+              value={llmProfileId}
+              onChange={(e) => setLlmProfileId(e.target.value)}
+              className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-white focus:outline-none focus:ring-2 focus:ring-cyan-500"
+            >
+              <option value="">Server Default</option>
+              {profiles.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name} ({p.reasoning_model}){p.is_default ? " [Default]" : ""}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+
+        <div className="border border-slate-800 rounded-xl bg-slate-950/60">
+          <button
+            type="button"
+            aria-expanded={showAuthVault}
+            onClick={() => setShowAuthVault(!showAuthVault)}
+            className="w-full flex items-center justify-between px-3 py-2 rounded-xl text-slate-300 hover:text-white font-medium focus:outline-none focus:ring-2 focus:ring-cyan-500"
+          >
+            <span className="flex items-center gap-1.5">
+              <Lock className="w-3.5 h-3.5 text-cyan-400" aria-hidden="true" /> Auth Headers & Session Cookies (Optional)
+            </span>
+            <span className="text-[11px] text-slate-500">{showAuthVault ? "Hide" : "Configure"}</span>
+          </button>
+          {showAuthVault && (
+            <div className="p-3 pt-2 grid grid-cols-1 md:grid-cols-2 gap-3 border-t border-slate-800">
+              <div>
+                <label htmlFor={`${idPrefix}-headers`} className="block text-slate-400 mb-1">
+                  Headers (Key: Value per line)
+                </label>
+                <textarea
+                  id={`${idPrefix}-headers`}
+                  rows={3}
+                  value={headersText}
+                  onChange={(e) => setHeadersText(e.target.value)}
+                  placeholder="Authorization: Bearer eyJ..."
+                  className="w-full bg-slate-950 border border-slate-800 rounded p-2 font-mono text-[11px] text-slate-200 focus:outline-none focus:ring-2 focus:ring-cyan-500"
+                />
+              </div>
+              <div>
+                <label htmlFor={`${idPrefix}-cookies`} className="block text-slate-400 mb-1">
+                  Cookies (name=value per line)
+                </label>
+                <textarea
+                  id={`${idPrefix}-cookies`}
+                  rows={3}
+                  value={cookiesText}
+                  onChange={(e) => setCookiesText(e.target.value)}
+                  placeholder="session_id=abc123"
+                  className="w-full bg-slate-950 border border-slate-800 rounded p-2 font-mono text-[11px] text-slate-200 focus:outline-none focus:ring-2 focus:ring-cyan-500"
+                />
+              </div>
+              <div>
+                <label htmlFor={`${idPrefix}-sec-headers`} className="block text-slate-400 mb-1">
+                  Secondary User/Role Headers (BOLA/IDOR)
+                </label>
+                <textarea
+                  id={`${idPrefix}-sec-headers`}
+                  rows={2}
+                  value={secHeadersText}
+                  onChange={(e) => setSecHeadersText(e.target.value)}
+                  placeholder="Authorization: Bearer userB_jwt"
+                  className="w-full bg-slate-950 border border-slate-800 rounded p-2 font-mono text-[11px] text-slate-200 focus:outline-none focus:ring-2 focus:ring-cyan-500"
+                />
+              </div>
+              <div>
+                <label htmlFor={`${idPrefix}-sec-cookies`} className="block text-slate-400 mb-1">
+                  Secondary User/Role Cookies
+                </label>
+                <textarea
+                  id={`${idPrefix}-sec-cookies`}
+                  rows={2}
+                  value={secCookiesText}
+                  onChange={(e) => setSecCookiesText(e.target.value)}
+                  placeholder="session_id=userB_cookie"
+                  className="w-full bg-slate-950 border border-slate-800 rounded p-2 font-mono text-[11px] text-slate-200 focus:outline-none focus:ring-2 focus:ring-cyan-500"
+                />
+              </div>
+            </div>
+          )}
+        </div>
+
+        <label className="flex items-center gap-2 text-slate-300 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={tier2Auto}
+            onChange={(e) => setTier2Auto(e.target.checked)}
+          />
+          Auto-approve bounded Tier 2 scans (ffuf, arjun, safe nuclei, nmap); always gate Tier 3
+        </label>
+
+        {error && (
+          <div role="alert" className="text-red-400 bg-red-950/40 border border-red-800 rounded p-2">
+            {error}
+          </div>
+        )}
       </form>
-    </div>
+    </ModalFrame>
   );
 };

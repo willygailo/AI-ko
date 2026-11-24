@@ -6,12 +6,38 @@ from dataclasses import dataclass, field
 
 
 SECRET_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    (
+        "PEM_KEY",
+        re.compile(
+            r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----"
+        ),
+    ),
     ("JWT", re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{8,}\b")),
-    ("BEARER", re.compile(r"(?i)(Authorization\s*:\s*Bearer\s+)([A-Za-z0-9._~+/-]{12,}=*)")),
-    ("BASIC", re.compile(r"(?i)(Authorization\s*:\s*Basic\s+)([A-Za-z0-9+/]{8,}={0,2})")),
-    ("COOKIE", re.compile(r"(?i)((?:Set-)?Cookie\s*:\s*)([^\r\n]+)")),
-    ("APIKEY", re.compile(r"\b(?:sk-[A-Za-z0-9_-]{20,}|ghp_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35})\b")),
-    ("KV_SECRET", re.compile(r"(?i)((?:api[_-]?key|access[_-]?token|secret[_-]?key|password|passwd)\s*[=:]\s*[\"']?)([^\"'\s&,;]{6,})")),
+    (
+        "BEARER",
+        re.compile(r'(?i)("?Authorization"?\s*:\s*"?Bearer\s+)([A-Za-z0-9._~+/-]{12,}=*)'),
+    ),
+    (
+        "BASIC",
+        re.compile(r'(?i)("?Authorization"?\s*:\s*"?Basic\s+)([A-Za-z0-9+/]{8,}={0,2})'),
+    ),
+    (
+        "X_API_KEY",
+        re.compile(r'(?i)("?X-API-Key"?\s*:\s*"?)([^"\'\r\n\s,;}\]]{6,})'),
+    ),
+    ("COOKIE", re.compile(r'(?i)("?(?:Set-)?Cookie"?\s*:\s*"?)([^\r\n"]+)')),
+    (
+        "APIKEY",
+        re.compile(
+            r"\b(?:sk-[A-Za-z0-9_-]{20,}|ghp_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}|aegis_[A-Za-z0-9_-]{20,})\b"
+        ),
+    ),
+    (
+        "KV_SECRET",
+        re.compile(
+            r'(?i)("?(?:api[_-]?key|access[_-]?token|secret[_-]?key|password|passwd)"?\s*[=:]\s*["\']?)([^"\'\s&,;}\]]{6,})'
+        ),
+    ),
 ]
 
 

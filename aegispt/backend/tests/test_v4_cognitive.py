@@ -12,22 +12,20 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-import pytest
 from fastapi.testclient import TestClient
 
-from app.agents.graph_context import build_graph_context, score_endpoint_risk
+from app.agents.graph_context import build_graph_context
 from app.agents.orchestrator import EngagementOrchestrator
 from app.config import get_settings
 from app.core.scope import ScopePolicy
 from app.db.database import close_db, init_db, session_scope
-from app.db.models import Endpoint, Engagement, Finding, ScopePolicyModel
+from app.db.models import Endpoint, Engagement, ScopePolicyModel
 from app.db.persistence import persist_tool_result
 from app.knowledge.store import knowledge_store
 from app.llm.schemas import ProposedToolCall
 from app.main import create_app
 from app.tools.base import DiscoveredFinding, ToolResult
 from app.tools.gitleaks_tool import GitleaksAdapter, GitleaksArgs
-from app.tools.http_probe import HttpProbeAdapter
 from app.tools.js_miner import analyze_js_text
 from app.tools.paramspider_tool import ParamspiderAdapter, ParamspiderArgs
 from app.tools.registry import tool_registry
@@ -351,7 +349,13 @@ def test_v4_deep_probes_oob_chainer_and_reverify(tmp_path: Path, monkeypatch):
             assert steer.status_code == 200
             assert "Focus on GraphQL & BOLA" in steer.json()["operator_hints"]
 
-            # 2. Local OOB hit
+            # 2. Local OOB hit (requires active engagement status)
+            oob_inactive = client.get(f"/oob/{eng_id}/ssrf-probe-inactive")
+            assert oob_inactive.status_code == 409
+
+            with sqlite3.connect(tmp_path / "aegispt.db") as conn:
+                conn.execute("UPDATE engagements SET status = 'running' WHERE id = ?", (eng_id,))
+                conn.commit()
             oob_hit = client.get(f"/oob/{eng_id}/ssrf-probe-1")
             assert oob_hit.status_code == 200
             oob_list = client.get(f"/api/v1/engagements/{eng_id}/oob", headers=hdrs).json()["oob_events"]
@@ -389,10 +393,17 @@ def test_v4_deep_probes_oob_chainer_and_reverify(tmp_path: Path, monkeypatch):
             md_rep = client.get(f"/api/v1/engagements/{eng_id}/report?format=markdown", headers=hdrs)
             assert "Synthesized Attack Chains" in md_rep.text
 
-            # 8. Re-verify a finding
-            first_id = findings[0]["id"]
-            reverify = client.post(f"/api/v1/findings/{first_id}/reverify", headers=hdrs)
+            # 8. Re-verify an http_probe finding and confirm non-http_probe findings require manual reverify
+            probe_finding = next(f for f in findings if f["tool_source"] == "http_probe")
+            reverify = client.post(f"/api/v1/findings/{probe_finding['id']}/reverify", headers=hdrs)
             assert reverify.status_code == 200 and reverify.json()["verified_at"]
+            assert reverify.json()["manual_reverify_required"] is False
+
+            js_finding = next(f for f in findings if f["tool_source"] == "js_miner")
+            reverify_js = client.post(f"/api/v1/findings/{js_finding['id']}/reverify", headers=hdrs)
+            assert reverify_js.status_code == 200
+            assert reverify_js.json()["manual_reverify_required"] is True
+            assert reverify_js.json()["still_present"] is None
     finally:
         httpd.shutdown()
         httpd.server_close()

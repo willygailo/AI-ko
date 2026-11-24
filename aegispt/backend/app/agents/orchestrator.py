@@ -13,6 +13,7 @@ from app.agents.chainer import synthesize_attack_chains
 from app.agents.graph_context import build_graph_context
 from app.core.events import event_bus
 from app.core.policy import approval_coordinator
+from app.core.ratelimit import rate_limiters
 from app.core.scope import ScopePolicy, ScopeViolationError
 from app.core.vault import decrypt_or_passthrough
 from app.db.database import session_scope
@@ -123,12 +124,16 @@ class EngagementOrchestrator:
                     redact_outbound=prof.redact_outbound,
                 )
 
+            chosen: LLMProfile | None = None
             if eng.llm_profile_id:
                 chosen = next((p for p in all_profiles if p.id == eng.llm_profile_id), None)
-                if chosen:
-                    llm_cfg = _to_cfg(chosen)
+            if chosen is None:
+                chosen = next((p for p in all_profiles if p.is_default), None)
+            if chosen is not None:
+                llm_cfg = _to_cfg(chosen)
+            chosen_id = chosen.id if chosen is not None else None
             for p in all_profiles:
-                if p.id != eng.llm_profile_id:
+                if p.id != chosen_id:
                     fallbacks.append(_to_cfg(p))
 
             return eng, scope, llm_cfg, fallbacks
@@ -244,11 +249,51 @@ class EngagementOrchestrator:
                         )
                     )
 
+    @staticmethod
+    def _norm_hypothesis_url(url: str) -> str:
+        p = urlparse((url or "").strip())
+        if p.scheme and p.netloc:
+            path = (p.path or "/").rstrip("/") or "/"
+            return f"{p.scheme.lower()}://{p.netloc.lower()}{path}"
+        return (url or "").strip().lower().rstrip("/")
+
+    @staticmethod
+    def _tool_cwe_scope(tool_name: str, args: dict[str, Any] | None = None) -> set[str] | None:
+        if tool_name == "sqlmap":
+            return {"CWE-89"}
+        if tool_name == "dalfox":
+            return {"CWE-79"}
+        if tool_name == "http_probe":
+            mode = str((args or {}).get("mode") or "")
+            mode_map: dict[str, set[str]] = {
+                "open_redirect_probe": {"CWE-601"},
+                "ssti_probe": {"CWE-1336", "CWE-94"},
+                "differential_bola": {"CWE-639", "CWE-862", "CWE-863"},
+                "bfla_verb_tamper": {"CWE-862", "CWE-863", "CWE-285"},
+                "jwt_active_probe": {"CWE-347", "CWE-287"},
+                "race_burst_probe": {"CWE-362"},
+                "graphql_deep_audit": {"CWE-200", "CWE-770"},
+                "oauth_audit": {"CWE-601", "CWE-346", "CWE-287"},
+            }
+            return mode_map.get(mode)
+        return None
+
     async def _update_hypothesis_outcome(
-        self, target: str, tool_name: str, new_findings: int
+        self,
+        target: str,
+        tool_name: str,
+        new_findings: int,
+        *,
+        found_cwes: set[str] | None = None,
+        args: dict[str, Any] | None = None,
     ) -> None:
         if tool_name not in {"dalfox", "sqlmap", "http_probe", "nuclei"}:
             return
+        norm_target = self._norm_hypothesis_url(target)
+        tool_cwes = self._tool_cwe_scope(tool_name, args)
+        arg_param = str((args or {}).get("param") or "").strip().lower()
+        found_cwes_upper = {c.upper() for c in (found_cwes or set()) if c}
+
         async with session_scope() as session:
             rows = (
                 await session.execute(
@@ -259,11 +304,22 @@ class EngagementOrchestrator:
                 )
             ).scalars().all()
             for row in rows:
-                if row.target_url == target or target.startswith(row.target_url) or row.target_url.startswith(target):
-                    row.status = "confirmed" if new_findings > 0 else "disproven"
-                    row.evidence_note = (
-                        f"Verified by `{tool_name}` ({new_findings} finding(s))."
-                    )
+                if self._norm_hypothesis_url(row.target_url) != norm_target:
+                    continue
+                if row.parameter and arg_param and row.parameter.strip().lower() != arg_param:
+                    continue
+                row_cwe = (row.cwe_id or "").strip().upper()
+                if row_cwe and tool_cwes is not None and row_cwe not in tool_cwes:
+                    continue
+                if new_findings > 0:
+                    if row_cwe and found_cwes_upper and row_cwe not in found_cwes_upper:
+                        continue
+                    row.status = "confirmed"
+                else:
+                    row.status = "disproven"
+                row.evidence_note = (
+                    f"Verified by `{tool_name}` ({new_findings} finding(s))."
+                )
 
     async def _persist_tool_result(self, result: ToolResult) -> int:
         async with session_scope() as session:
@@ -278,8 +334,11 @@ class EngagementOrchestrator:
         )
         ep_blob = " ".join(str(ep.get("url") or "").lower() for ep in graph.get("endpoints", []))
         has_wp = "wordpress" in tech_blob or "wp-content" in ep_blob or "wp-json" in ep_blob
-        disproven_urls = {
-            h.get("target_url")
+        disproven_pairs: set[tuple[str, str]] = {
+            (
+                self._norm_hypothesis_url(str(h.get("target_url") or "")),
+                str(h.get("cwe_id") or "").strip().upper(),
+            )
             for h in (graph.get("hypotheses") or [])
             if h.get("status") == "disproven"
         }
@@ -289,9 +348,14 @@ class EngagementOrchestrator:
             if prop.tool_name == "wpscan" and not has_wp:
                 self._feedback_history.append("Critic skipped wpscan (no WordPress signal detected).")
                 continue
-            if prop.tool_name in {"dalfox", "sqlmap"} and prop.target in disproven_urls:
-                self._feedback_history.append(f"Critic avoided re-testing disproven target `{prop.target}` with `{prop.tool_name}`.")
-                continue
+            if prop.tool_name in {"dalfox", "sqlmap"}:
+                norm_prop = self._norm_hypothesis_url(prop.target)
+                expected_cwe = "CWE-79" if prop.tool_name == "dalfox" else "CWE-89"
+                if (norm_prop, expected_cwe) in disproven_pairs or (norm_prop, "") in disproven_pairs:
+                    self._feedback_history.append(
+                        f"Critic avoided re-testing disproven target `{prop.target}` with `{prop.tool_name}`."
+                    )
+                    continue
             kept.append(prop)
         return kept
 
@@ -413,8 +477,28 @@ class EngagementOrchestrator:
                 )
                 return False
             effective_args_dict = decision.args
-            validated_args = adapter.validate_args(effective_args_dict)
-            norm_target = adapter.validate_scope(norm_target, validated_args, scope)
+            try:
+                validated_args = adapter.validate_args(effective_args_dict)
+                norm_target = adapter.validate_scope(norm_target, validated_args, scope)
+                effective_args_dict = validated_args.model_dump()
+            except (ScopeViolationError, Exception) as exc:
+                self._feedback_history.append(
+                    f"Modified args for `{adapter.name}` blocked by policy/scope: {exc}"
+                )
+                async with session_scope() as session:
+                    r = await session.get(ToolRun, run_id)
+                    if r:
+                        r.status = "blocked"
+                        r.error_message = f"Modified args rejected: {exc}"
+                        r.completed_at = datetime.now(timezone.utc)
+                await event_bus.publish(
+                    engagement_id=self.engagement_id,
+                    event_type="scope_blocked",
+                    agent_name="policy",
+                    message=f"Blocked modified args for `{adapter.name}` on `{norm_target}`: {exc}",
+                    payload={"tool_run_id": run_id, "reason": str(exc)},
+                )
+                return False
 
         if not await self._wait_if_paused():
             return False
@@ -488,7 +572,14 @@ class EngagementOrchestrator:
             await self._sync_skill_checklist(graph, tool_name=adapter.name, new_findings=new_findings)
             await self._record_skill_outcome(graph, adapter.name, new_findings)
         if tier == 3:
-            await self._update_hypothesis_outcome(norm_target, adapter.name, new_findings)
+            found_cwes = {f.cwe_id for f in result.findings if f.cwe_id}
+            await self._update_hypothesis_outcome(
+                norm_target,
+                adapter.name,
+                new_findings,
+                found_cwes=found_cwes,
+                args=effective_args_dict,
+            )
         return True
 
     async def _plan_next_step(
@@ -507,7 +598,7 @@ class EngagementOrchestrator:
         )
         ep_tokens = " ".join(e.get("url", "") for e in graph.get("endpoints", [])[:15])
         hint_tokens = " ".join(graph.get("operator_hints") or [])
-        playbooks = knowledge_store.search(f"{objective} {tech_tokens} {ep_tokens} {hint_tokens}", limit=5)
+        playbooks = await knowledge_store.search_async(f"{objective} {tech_tokens} {ep_tokens} {hint_tokens}", limit=5)
 
         distilled_notes = ""
         if len(graph.get("endpoints", [])) > 20 or len(graph.get("recent_runs", [])) > 8:
@@ -888,7 +979,7 @@ class EngagementOrchestrator:
         )
 
     async def run(self) -> None:
-        knowledge_store.ensure_indexed()
+        await knowledge_store.ensure_indexed_async()
         eng, scope, llm_cfg, fallbacks = await self._load_state()
 
         async with session_scope() as session:
@@ -1098,9 +1189,11 @@ class OrchestratorManager:
         task = asyncio.create_task(runner.run(), name=f"aegispt-{engagement_id}")
         self._tasks[engagement_id] = task
 
-        def _cleanup(_t: asyncio.Task[None]) -> None:
-            self._tasks.pop(engagement_id, None)
-            self._runners.pop(engagement_id, None)
+        def _cleanup(finished_task: asyncio.Task[None]) -> None:
+            if self._tasks.get(engagement_id) is finished_task:
+                self._tasks.pop(engagement_id, None)
+                if self._runners.get(engagement_id) is runner:
+                    self._runners.pop(engagement_id, None)
 
         task.add_done_callback(_cleanup)
 
@@ -1147,6 +1240,19 @@ class OrchestratorManager:
             try:
                 await task
             except asyncio.CancelledError:
+                pass
+        async with session_scope() as session:
+            e = await session.get(Engagement, engagement_id)
+            if e and e.status != "stopped":
+                e.status = "stopped"
+        rate_limiters.remove(engagement_id)
+
+    async def stop_all(self) -> None:
+        active_ids = list(self._tasks.keys())
+        for eid in active_ids:
+            try:
+                await self.stop(eid)
+            except Exception:
                 pass
 
 

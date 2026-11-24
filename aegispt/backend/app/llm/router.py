@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import asyncio
-import json
+import ipaddress
+import socket
 from dataclasses import dataclass
 from typing import Any, Literal
 from urllib.parse import urlparse
@@ -11,7 +12,70 @@ import httpx
 
 from app.config import get_settings
 from app.core.redactor import SecretRedactor
+from app.core.scope import BLOCKED_METADATA_HOSTS, BLOCKED_METADATA_IPS, UNSAFE_CONTROL_RE
 from app.llm.schemas import parse_json_object
+
+EXTRA_BLOCKED_LLM_HOSTS = BLOCKED_METADATA_HOSTS | {
+    "metadata.azure.com",
+    "metadata.aws.internal",
+}
+
+
+def _is_blocked_llm_ip(ip_obj: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    if ip_obj in BLOCKED_METADATA_IPS or ip_obj.is_link_local or ip_obj.is_multicast:
+        return True
+    mapped = getattr(ip_obj, "ipv4_mapped", None)
+    if mapped is not None and (mapped in BLOCKED_METADATA_IPS or mapped.is_link_local):
+        return True
+    return False
+
+
+def validate_llm_base_url(base_url: str, *, resolve_dns: bool = True) -> str:
+    """Validate an LLM provider base URL against SSRF to cloud metadata / link-local hosts."""
+    if not base_url or not isinstance(base_url, str):
+        raise ValueError("LLM base_url is required.")
+    raw = base_url.strip()
+    if UNSAFE_CONTROL_RE.search(raw):
+        raise ValueError("LLM base_url contains disallowed control characters.")
+
+    parsed = urlparse(raw)
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in {"http", "https"}:
+        raise ValueError(f"LLM base_url must use http or https scheme (got {scheme!r}).")
+
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if not host:
+        raise ValueError("LLM base_url must include a valid hostname.")
+    if host in EXTRA_BLOCKED_LLM_HOSTS:
+        raise ValueError(f"LLM base_url host {host!r} is a blocked metadata hostname.")
+
+    try:
+        ip_obj = ipaddress.ip_address(host.strip("[]"))
+    except ValueError:
+        ip_obj = None
+
+    if ip_obj is not None:
+        if _is_blocked_llm_ip(ip_obj):
+            raise ValueError(f"LLM base_url IP {ip_obj} is a blocked metadata/link-local address.")
+        return raw.rstrip("/")
+
+    if resolve_dns:
+        try:
+            infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+            resolved_ips = {info[4][0] for info in infos}
+        except socket.gaierror:
+            resolved_ips = set()
+        for ip_str in resolved_ips:
+            try:
+                resolved_ip = ipaddress.ip_address(ip_str.strip("[]"))
+            except ValueError:
+                continue
+            if _is_blocked_llm_ip(resolved_ip):
+                raise ValueError(
+                    f"LLM base_url host {host!r} resolves to blocked metadata/link-local address {resolved_ip}."
+                )
+
+    return raw.rstrip("/")
 
 
 @dataclass
@@ -67,6 +131,35 @@ class LLMRouter:
 
     def __init__(self, timeout: float = 90.0) -> None:
         self.timeout = timeout
+        self._local_client: httpx.AsyncClient | None = None
+        self._remote_client: httpx.AsyncClient | None = None
+        self._client_loop: asyncio.AbstractEventLoop | None = None
+
+    def _get_client(self, *, is_local: bool) -> httpx.AsyncClient:
+        loop = asyncio.get_running_loop()
+        if self._client_loop is not loop:
+            # Event loop changed (e.g. across asyncio.run calls in tests); recreate pooled clients.
+            self._local_client = None
+            self._remote_client = None
+            self._client_loop = loop
+        if is_local:
+            if self._local_client is None or self._local_client.is_closed:
+                self._local_client = httpx.AsyncClient(timeout=self.timeout, trust_env=False)
+            return self._local_client
+        if self._remote_client is None or self._remote_client.is_closed:
+            self._remote_client = httpx.AsyncClient(timeout=self.timeout, trust_env=True)
+        return self._remote_client
+
+    async def aclose(self) -> None:
+        for attr in ("_local_client", "_remote_client"):
+            client = getattr(self, attr)
+            if client is not None and not client.is_closed:
+                try:
+                    await client.aclose()
+                except Exception:
+                    pass
+            setattr(self, attr, None)
+        self._client_loop = None
 
     async def complete(
         self,
@@ -80,10 +173,14 @@ class LLMRouter:
         max_tokens: int = 1600,
         max_retries: int = 2,
     ) -> LLMCompletionResult:
+        if get_settings().llm_mode.strip().lower() == "offline":
+            raise RuntimeError("Outbound LLM calls are disabled (AEGISPT_LLM_MODE=offline).")
+
         candidates = [profile or default_profile_from_settings(), *(fallback_profiles or [])]
         last_exc: Exception | None = None
 
         for cfg in candidates:
+            validate_llm_base_url(cfg.base_url, resolve_dns=False)
             model = cfg.fast_model if tier == "fast" else cfg.reasoning_model
             redactor: SecretRedactor | None = None
             prepared_messages = messages
@@ -193,12 +290,10 @@ class LLMRouter:
         if json_mode:
             body["format"] = "json"
 
-        async with httpx.AsyncClient(
-            timeout=self.timeout, trust_env=not cfg.is_local_endpoint
-        ) as client:
-            resp = await client.post(url, json=body, headers=headers)
-            resp.raise_for_status()
-            data = resp.json()
+        client = self._get_client(is_local=cfg.is_local_endpoint)
+        resp = await client.post(url, json=body, headers=headers)
+        resp.raise_for_status()
+        data = resp.json()
 
         msg = data.get("message") or {}
         content = msg.get("content", "")
@@ -237,12 +332,10 @@ class LLMRouter:
         if json_mode:
             body["response_format"] = {"type": "json_object"}
 
-        async with httpx.AsyncClient(
-            timeout=self.timeout, trust_env=not cfg.is_local_endpoint
-        ) as client:
-            resp = await client.post(url, json=body, headers=headers)
-            resp.raise_for_status()
-            data = resp.json()
+        client = self._get_client(is_local=cfg.is_local_endpoint)
+        resp = await client.post(url, json=body, headers=headers)
+        resp.raise_for_status()
+        data = resp.json()
 
         choices = data.get("choices") or []
         content = ""
@@ -257,26 +350,36 @@ class LLMRouter:
 
     async def list_models(self, profile: LLMProfileConfig | None = None) -> dict[str, Any]:
         cfg = profile or default_profile_from_settings()
+        if get_settings().llm_mode.strip().lower() == "offline":
+            return {
+                "reachable": False,
+                "offline": True,
+                "provider": cfg.provider,
+                "base_url": cfg.base_url,
+                "models": [],
+                "error": "Outbound LLM calls are disabled (AEGISPT_LLM_MODE=offline).",
+            }
         try:
-            async with httpx.AsyncClient(
-                timeout=8.0, trust_env=not cfg.is_local_endpoint
-            ) as client:
-                if cfg.provider == "ollama":
-                    headers = {"Authorization": f"Bearer {cfg.api_key}"} if cfg.api_key else {}
-                    resp = await client.get(self._ollama_url(cfg.base_url, "tags"), headers=headers)
-                    resp.raise_for_status()
-                    data = resp.json()
-                    models = [m.get("name") for m in data.get("models", []) if m.get("name")]
-                    return {"reachable": True, "provider": "ollama", "base_url": cfg.base_url, "models": models}
-                else:
-                    base = cfg.base_url.rstrip("/")
-                    url = f"{base}/models" if base.endswith("/v1") else f"{base}/v1/models"
-                    headers = {"Authorization": f"Bearer {cfg.api_key}"} if cfg.api_key else {}
-                    resp = await client.get(url, headers=headers)
-                    resp.raise_for_status()
-                    data = resp.json()
-                    models = [m.get("id") for m in data.get("data", []) if m.get("id")]
-                    return {"reachable": True, "provider": "openai_compat", "base_url": cfg.base_url, "models": models}
+            await asyncio.to_thread(validate_llm_base_url, cfg.base_url, resolve_dns=True)
+            client = self._get_client(is_local=cfg.is_local_endpoint)
+            if cfg.provider == "ollama":
+                headers = {"Authorization": f"Bearer {cfg.api_key}"} if cfg.api_key else {}
+                resp = await client.get(
+                    self._ollama_url(cfg.base_url, "tags"), headers=headers, timeout=8.0
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                models = [m.get("name") for m in data.get("models", []) if m.get("name")]
+                return {"reachable": True, "provider": "ollama", "base_url": cfg.base_url, "models": models}
+            else:
+                base = cfg.base_url.rstrip("/")
+                url = f"{base}/models" if base.endswith("/v1") else f"{base}/v1/models"
+                headers = {"Authorization": f"Bearer {cfg.api_key}"} if cfg.api_key else {}
+                resp = await client.get(url, headers=headers, timeout=8.0)
+                resp.raise_for_status()
+                data = resp.json()
+                models = [m.get("id") for m in data.get("data", []) if m.get("id")]
+                return {"reachable": True, "provider": "openai_compat", "base_url": cfg.base_url, "models": models}
         except Exception as exc:
             return {
                 "reachable": False,

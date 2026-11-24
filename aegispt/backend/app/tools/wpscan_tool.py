@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field
 
@@ -74,10 +75,12 @@ class WpscanAdapter(BaseToolAdapter):
                 techs.append(f"wordpress:{ver}")
             for pname in list((doc.get("plugins") or {}).keys())[:10]:
                 techs.append(f"wp-plugin:{pname}")
+            parsed_target = urlparse(target if "://" in target else f"https://{target}")
+            host = (parsed_target.hostname or target).lower()
             assets.append(
                 DiscoveredAsset(
                     asset_type="host",
-                    value=target,
+                    value=host,
                     technologies=techs,
                     discovered_by=self.name,
                 )

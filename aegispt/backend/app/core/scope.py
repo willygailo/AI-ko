@@ -1,14 +1,15 @@
 """Non-bypassable ScopePolicy engine enforcing allowlist-only target boundaries."""
 from __future__ import annotations
 
+import asyncio
 import fnmatch
 import ipaddress
 import posixpath
 import re
 import socket
 from dataclasses import dataclass, field
-from typing import Callable
-from urllib.parse import urlparse
+from typing import Any, Callable
+from urllib.parse import unquote, urlparse
 
 from app.core.vault import decrypt_dict
 
@@ -59,11 +60,15 @@ class ScopePolicy:
         self.max_rps = max(1, min(int(self.max_rps), 100))
         self.max_concurrency = max(1, min(int(self.max_concurrency), 30))
 
-        # Validate header keys/values against CRLF injection
+        # Validate header and cookie keys/values against CRLF / control-char injection
         for header_map in (self.custom_headers, self.secondary_headers):
             for k, v in header_map.items():
                 if UNSAFE_CONTROL_RE.search(k) or UNSAFE_CONTROL_RE.search(str(v)):
                     raise ScopeViolationError(f"Header contains control characters: {k!r}")
+        for cookie_map in (self.auth_cookies, self.secondary_cookies):
+            for k, v in cookie_map.items():
+                if UNSAFE_CONTROL_RE.search(k) or UNSAFE_CONTROL_RE.search(str(v)):
+                    raise ScopeViolationError(f"Cookie contains control characters: {k!r}")
 
     @property
     def has_secondary_auth(self) -> bool:
@@ -123,8 +128,18 @@ class ScopePolicy:
                 return True
         return False
 
-    def _normalize_path(self, path: str) -> str:
-        raw = path or "/"
+    @staticmethod
+    def _unquote_path(path: str) -> str:
+        decoded = path or "/"
+        for _ in range(3):
+            nxt = unquote(decoded)
+            if nxt == decoded:
+                break
+            decoded = nxt
+        return decoded.replace("\\", "/")
+
+    def _normalize_path(self, path: str, *, decode: bool = True) -> str:
+        raw = self._unquote_path(path) if decode else (path or "/")
         if not raw.startswith("/"):
             raw = "/" + raw
         norm = posixpath.normpath(raw)
@@ -135,18 +150,28 @@ class ScopePolicy:
         return norm
 
     def _is_path_excluded(self, path: str) -> bool:
-        norm_path = self._normalize_path(path)
-        for pat in self.excluded_paths:
-            if not pat:
-                continue
-            if "*" in pat or "?" in pat:
-                if fnmatch.fnmatch(norm_path, pat):
-                    return True
-            else:
-                norm_pat = self._normalize_path(pat).rstrip("/")
-                if norm_path.rstrip("/") == norm_pat or norm_path.startswith(norm_pat + "/"):
-                    return True
+        candidates = {
+            self._normalize_path(path, decode=False),
+            self._normalize_path(path, decode=True),
+        }
+        for norm_path in candidates:
+            for pat in self.excluded_paths:
+                if not pat:
+                    continue
+                if "*" in pat or "?" in pat:
+                    if fnmatch.fnmatch(norm_path, pat):
+                        return True
+                else:
+                    norm_pat = self._normalize_path(pat, decode=True).rstrip("/")
+                    if norm_path.rstrip("/") == norm_pat or norm_path.startswith(norm_pat + "/"):
+                        return True
         return False
+
+    @staticmethod
+    def _effective_port(scheme: str, port: int | None) -> int:
+        if port is not None:
+            return port
+        return 443 if scheme.lower() == "https" else 80
 
     def _check_ip_safety(self, ip_obj, explicitly_allowlisted: bool) -> None:
         if ip_obj in BLOCKED_METADATA_IPS and not explicitly_allowlisted:
@@ -164,17 +189,7 @@ class ScopePolicy:
                 f"Target resolves to private/loopback IP {ip_obj}, which is disabled in scope policy."
             )
 
-    def validate_target(
-        self,
-        target: str,
-        *,
-        resolve_dns: bool = True,
-        dns_resolver: Callable[[str], list[str]] | None = None,
-    ) -> str:
-        """Validate a URL, hostname, or IP against the allowlist, exclusions, and DNS boundary.
-
-        Returns the normalized target string if allowed, otherwise raises ScopeViolationError.
-        """
+    def _validate_target_pre_dns(self, target: str) -> tuple[str, str, Any]:
         if not target or not isinstance(target, str):
             raise ScopeViolationError("Empty target is not allowed.")
 
@@ -191,13 +206,15 @@ class ScopePolicy:
         has_scheme = "://" in target
         if has_scheme:
             parsed = urlparse(target)
-            if parsed.scheme.lower() not in ("http", "https"):
+            scheme = parsed.scheme.lower()
+            if scheme not in ("http", "https"):
                 raise ScopeViolationError(f"Disallowed URL scheme: {parsed.scheme!r}")
             host = (parsed.hostname or "").lower().rstrip(".")
             path = parsed.path or "/"
             port = parsed.port
         else:
             parsed = urlparse(f"https://{target}")
+            scheme = "https"
             host = (parsed.hostname or "").lower().rstrip(".")
             path = parsed.path if "/" in target else "/"
             port = parsed.port
@@ -211,7 +228,7 @@ class ScopePolicy:
         if self._is_host_excluded(host):
             raise ScopeViolationError(f"Host {host!r} is explicitly excluded by scope policy.")
 
-        if has_scheme and self._is_path_excluded(path):
+        if self._is_path_excluded(path):
             raise ScopeViolationError(f"Path {path!r} is explicitly excluded by scope policy.")
 
         # Check allowlist membership
@@ -231,19 +248,36 @@ class ScopePolicy:
                     allowed = True
                     break
 
-        norm_req_path = self._normalize_path(path)
+        norm_req_path = self._normalize_path(path, decode=True)
+        norm_raw_path = self._normalize_path(path, decode=False)
 
         # Check allowed_urls
         if not allowed:
             for raw_url in self.allowed_urls:
                 up = urlparse(raw_url if "://" in raw_url else f"https://{raw_url}")
                 u_host = (up.hostname or "").lower().rstrip(".")
-                u_port = up.port
-                u_path = self._normalize_path(up.path or "/").rstrip("/")
+                u_scheme = (up.scheme or "https").lower()
+                u_eff_port = self._effective_port(u_scheme, up.port)
+                u_path = self._normalize_path(up.path or "/", decode=True).rstrip("/")
                 if host == u_host:
-                    if u_port is not None and port is not None and u_port != port:
-                        continue
-                    if not u_path or norm_req_path.rstrip("/") == u_path or norm_req_path.startswith(u_path + "/"):
+                    if has_scheme:
+                        t_eff_port = self._effective_port(scheme, port)
+                        if u_eff_port != t_eff_port:
+                            continue
+                    elif port is not None:
+                        if u_eff_port != port:
+                            continue
+                    elif "/" in target or ip_obj is not None:
+                        if u_eff_port not in (80, 443):
+                            continue
+                    path_ok = (
+                        not u_path
+                        or (
+                            (norm_req_path.rstrip("/") == u_path or norm_req_path.startswith(u_path + "/"))
+                            and (norm_raw_path.rstrip("/") == u_path or norm_raw_path.startswith(u_path + "/"))
+                        )
+                    )
+                    if path_ok:
                         allowed = True
                         if ip_obj is not None:
                             explicitly_ip_allowed = True
@@ -257,30 +291,73 @@ class ScopePolicy:
         # Direct IP safety check
         if ip_obj is not None:
             self._check_ip_safety(ip_obj, explicitly_ip_allowed)
-            return target
+
+        return target, host, ip_obj
+
+    def _validate_resolved_ips(self, ips: list[str]) -> None:
+        for ip_str in ips:
+            resolved_ip = self._parse_ip(ip_str)
+            if resolved_ip is not None:
+                self._check_ip_safety(
+                    resolved_ip,
+                    explicitly_allowlisted=self._ip_in_allowed_cidrs(resolved_ip),
+                )
+
+    def validate_target(
+        self,
+        target: str,
+        *,
+        resolve_dns: bool = True,
+        dns_resolver: Callable[[str], list[str]] | None = None,
+    ) -> str:
+        """Validate a URL, hostname, or IP against the allowlist, exclusions, and DNS boundary.
+
+        Returns the normalized target string if allowed, otherwise raises ScopeViolationError.
+        """
+        norm_target, host, ip_obj = self._validate_target_pre_dns(target)
+        if ip_obj is not None or not resolve_dns:
+            return norm_target
 
         # DNS resolution boundary check (prevents DNS rebinding / accidental pivot to metadata/internal IPs)
-        if resolve_dns:
-            ips: list[str] = []
-            if dns_resolver is not None:
-                ips = dns_resolver(host)
-            else:
-                try:
-                    infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
-                    ips = sorted({info[4][0] for info in infos})
-                except socket.gaierror:
-                    # Unresolvable host (e.g. offline/DNS-only recon or synthetic domain); allowlisted domain still passes
-                    ips = []
+        ips: list[str] = []
+        if dns_resolver is not None:
+            ips = dns_resolver(host)
+        else:
+            try:
+                infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+                ips = sorted({info[4][0] for info in infos})
+            except socket.gaierror:
+                # Unresolvable host (e.g. offline/DNS-only recon or synthetic domain); allowlisted domain still passes
+                ips = []
 
-            for ip_str in ips:
-                resolved_ip = self._parse_ip(ip_str)
-                if resolved_ip is not None:
-                    self._check_ip_safety(
-                        resolved_ip,
-                        explicitly_allowlisted=self._ip_in_allowed_cidrs(resolved_ip),
-                    )
+        self._validate_resolved_ips(ips)
+        return norm_target
 
-        return target
+    async def validate_target_async(
+        self,
+        target: str,
+        *,
+        resolve_dns: bool = True,
+        dns_resolver: Callable[[str], list[str]] | None = None,
+    ) -> str:
+        """Async version of validate_target that performs non-blocking DNS resolution."""
+        norm_target, host, ip_obj = self._validate_target_pre_dns(target)
+        if ip_obj is not None or not resolve_dns:
+            return norm_target
+
+        ips: list[str] = []
+        if dns_resolver is not None:
+            ips = await asyncio.to_thread(dns_resolver, host)
+        else:
+            loop = asyncio.get_running_loop()
+            try:
+                infos = await loop.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+                ips = sorted({info[4][0] for info in infos})
+            except socket.gaierror:
+                ips = []
+
+        self._validate_resolved_ips(ips)
+        return norm_target
 
     def primary_seed_urls(self) -> list[str]:
         seeds: list[str] = []

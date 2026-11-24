@@ -37,7 +37,14 @@ class ParamspiderAdapter(BaseToolAdapter):
         return [bin_path, "-d", dom, "-s", "-p", "FUZZ"]
 
     def parse_output(
-        self, *, target: str, args: BaseModel, stdout: str, stderr: str, work_dir: Path
+        self,
+        *,
+        target: str,
+        args: BaseModel,
+        stdout: str,
+        stderr: str,
+        work_dir: Path,
+        scope: ScopePolicy | None = None,
     ) -> ToolResult:
         dom = self._extract_domain(target)
         urls: list[str] = []
@@ -56,6 +63,11 @@ class ParamspiderAdapter(BaseToolAdapter):
             if p.hostname and (p.hostname.lower() == dom or p.hostname.lower().endswith("." + dom)):
                 if line in seen:
                     continue
+                if scope is not None:
+                    try:
+                        scope.validate_target(line, resolve_dns=False)
+                    except ScopeViolationError:
+                        continue
                 seen.add(line)
                 endpoints.append(
                     DiscoveredEndpoint(

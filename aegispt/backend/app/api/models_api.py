@@ -1,6 +1,7 @@
 """LLM Provider Profile management and live model discovery routes."""
 from __future__ import annotations
 
+import asyncio
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,7 +11,7 @@ from app.core.auth import require_api_token
 from app.core.vault import encrypt_str
 from app.db.database import get_db
 from app.db.models import LLMProfile
-from app.llm.router import LLMProfileConfig, llm_router
+from app.llm.router import LLMProfileConfig, llm_router, validate_llm_base_url
 
 router = APIRouter(
     prefix="/api/v1/llm-profiles",
@@ -42,6 +43,11 @@ async def list_profiles(db: AsyncSession = Depends(get_db)) -> dict[str, object]
 
 @router.post("", status_code=201)
 async def create_profile(body: LLMProfileCreate, db: AsyncSession = Depends(get_db)) -> dict[str, object]:
+    try:
+        clean_base_url = await asyncio.to_thread(validate_llm_base_url, body.base_url, resolve_dns=True)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
     existing = (
         await db.execute(select(LLMProfile).where(LLMProfile.name == body.name))
     ).scalar_one_or_none()
@@ -52,7 +58,7 @@ async def create_profile(body: LLMProfileCreate, db: AsyncSession = Depends(get_
     prof = LLMProfile(
         name=body.name,
         provider=body.provider,
-        base_url=body.base_url.rstrip("/"),
+        base_url=clean_base_url,
         api_key=encrypt_str(body.api_key),
         fast_model=body.fast_model,
         reasoning_model=body.reasoning_model,
@@ -60,6 +66,18 @@ async def create_profile(body: LLMProfileCreate, db: AsyncSession = Depends(get_
         is_default=body.is_default,
     )
     db.add(prof)
+    await db.commit()
+    await db.refresh(prof)
+    return _serialize_profile(prof)
+
+
+@router.post("/{profile_id}/default")
+async def set_default_profile(profile_id: str, db: AsyncSession = Depends(get_db)) -> dict[str, object]:
+    prof = await db.get(LLMProfile, profile_id)
+    if not prof:
+        raise HTTPException(status_code=404, detail="LLM profile not found.")
+    await db.execute(update(LLMProfile).values(is_default=False))
+    prof.is_default = True
     await db.commit()
     await db.refresh(prof)
     return _serialize_profile(prof)
@@ -77,10 +95,14 @@ async def delete_profile(profile_id: str, db: AsyncSession = Depends(get_db)) ->
 
 @router.post("/discover")
 async def discover_models(body: LLMDiscoverInput) -> dict[str, object]:
+    try:
+        clean_base_url = await asyncio.to_thread(validate_llm_base_url, body.base_url, resolve_dns=True)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     cfg = LLMProfileConfig(
         name="probe",
         provider=body.provider,
-        base_url=body.base_url.rstrip("/"),
+        base_url=clean_base_url,
         api_key=body.api_key,
         fast_model="",
         reasoning_model="",

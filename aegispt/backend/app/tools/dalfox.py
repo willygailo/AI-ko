@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -11,7 +12,7 @@ from app.tools.base import BaseToolAdapter, DiscoveredFinding, ToolResult, resol
 
 
 class DalfoxArgs(BaseModel):
-    param: str | None = None
+    param: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_][A-Za-z0-9_.\[\]-]{0,127}$")
     skip_bav: bool = True
     timeout_seconds: int = Field(default=150, ge=20, le=300)
 
@@ -104,7 +105,11 @@ class DalfoxAdapter(BaseToolAdapter):
                         "param": param,
                         "poc": poc,
                     },
-                    poc_command=f"curl -i -s '{poc}'" if str(poc).startswith("http") else None,
+                    poc_command=(
+                        f"curl -i -s {shlex.quote(str(poc))}"
+                        if str(poc).startswith(("http://", "https://"))
+                        else None
+                    ),
                     remediation="Apply context-aware output encoding and strict Content-Security-Policy (CSP).",
                     tool_source=self.name,
                 )

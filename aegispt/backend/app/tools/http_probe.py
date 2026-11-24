@@ -8,6 +8,7 @@ import hashlib
 import hmac
 import json
 import re
+import shlex
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse
@@ -16,7 +17,7 @@ import httpx
 from pydantic import BaseModel, Field
 
 from app.core.ratelimit import TokenBucketRateLimiter, rate_limiters
-from app.core.scope import ScopePolicy
+from app.core.scope import ScopePolicy, ScopeViolationError
 from app.tools.base import (
     BaseToolAdapter,
     DiscoveredAsset,
@@ -44,6 +45,13 @@ API_SCHEMA_PATHS = [
     "/robots.txt",
     "/.well-known/security.txt",
 ]
+OPENAPI_SPEC_PATHS = {
+    "/openapi.json",
+    "/swagger.json",
+    "/v3/api-docs",
+    "/api-docs",
+    "/swagger/v1/swagger.json",
+}
 GRAPHQL_PATHS = ["/graphql", "/api/graphql", "/v1/graphql", "/graphiql", "/graphql/console"]
 WEAK_JWT_PLACEHOLDERS = (
     "secret",
@@ -73,6 +81,20 @@ def _decode_jwt_part(part: str) -> dict[str, Any] | None:
 
 def _b64url(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+def _redact_set_cookie(raw_header: str) -> str:
+    """Redact the cookie value in a Set-Cookie header while preserving name and attributes."""
+    parts = raw_header.split(";")
+    if not parts:
+        return "<REDACTED>"
+    first = parts[0]
+    if "=" in first:
+        name, _ = first.split("=", 1)
+        parts[0] = f"{name.strip()}=<REDACTED>"
+    else:
+        parts[0] = "<REDACTED>"
+    return ";".join(parts)
 
 
 def _headers_with_cookies(headers: dict[str, str], cookies: dict[str, str] | None) -> dict[str, str]:
@@ -259,7 +281,7 @@ class HttpProbeAdapter(BaseToolAdapter):
         req_headers = _headers_with_cookies(headers, cookies)
         resp: httpx.Response | None = None
         for _ in range(max_hops + 1):
-            scope.validate_target(current_url, resolve_dns=True)
+            await asyncio.to_thread(scope.validate_target, current_url, resolve_dns=True)
             await limiter.acquire()
             resp = await client.request(
                 current_method,
@@ -273,7 +295,7 @@ class HttpProbeAdapter(BaseToolAdapter):
             if not loc:
                 return resp
             next_url = urljoin(current_url, loc)
-            scope.validate_target(next_url, resolve_dns=True)
+            await asyncio.to_thread(scope.validate_target, next_url, resolve_dns=True)
             current_url = next_url
             if resp.status_code == 303:
                 current_method = "GET"
@@ -402,7 +424,7 @@ class HttpProbeAdapter(BaseToolAdapter):
                             cvss_score=3.1,
                             description=f"Target response omitted recommended defensive headers: {', '.join(missing)}.",
                             evidence={"url": final_url, "status_code": resp.status_code, "missing_headers": missing},
-                            poc_command=f"curl -i -s '{final_url}' | head -n 30",
+                            poc_command=f"curl -i -s {shlex.quote(final_url)}",
                             remediation="Configure HSTS (on HTTPS), Content-Security-Policy, X-Frame-Options, X-Content-Type-Options: nosniff, and Referrer-Policy.",
                             tool_source=self.name,
                         )
@@ -430,8 +452,8 @@ class HttpProbeAdapter(BaseToolAdapter):
                                 owasp_category="A05:2021 - Security Misconfiguration",
                                 cvss_score=3.5,
                                 description=f"Set-Cookie header for '{ck_name}' lacks: {', '.join(weaknesses)}.",
-                                evidence={"set_cookie": ck, "missing_flags": weaknesses},
-                                poc_command=f"curl -I -s '{final_url}' | grep -i set-cookie",
+                                evidence={"set_cookie": _redact_set_cookie(ck), "missing_flags": weaknesses},
+                                poc_command=f"curl -I -s {shlex.quote(final_url)}",
                                 remediation="Set HttpOnly, Secure (over HTTPS), and SameSite=Lax/Strict attributes on sensitive cookies.",
                                 tool_source=self.name,
                             )
@@ -484,7 +506,7 @@ class HttpProbeAdapter(BaseToolAdapter):
                                         "access_control_allow_origin": acao,
                                         "access_control_allow_credentials": acac,
                                     },
-                                    poc_command=f"curl -I -H 'Origin: {origin_cand}' '{final_url}'",
+                                    poc_command=f"curl -I -H {shlex.quote(f'Origin: {origin_cand}')} {shlex.quote(final_url)}",
                                     remediation="Restrict Access-Control-Allow-Origin to an explicit allowlist of trusted origins and never trust 'null' or wildcard origins with credentials.",
                                     tool_source=self.name,
                                 )
@@ -509,9 +531,57 @@ class HttpProbeAdapter(BaseToolAdapter):
                         )
                     except Exception:
                         continue
-                    if r.status_code in (200, 401, 403):
-                        ct = r.headers.get("content-type", "")
-                        if r.status_code == 200 and path.endswith(".json") and "json" in ct.lower():
+                    ct = r.headers.get("content-type", "")
+                    if path == "/graphql" and r.status_code in (200, 400):
+                        endpoints.append(
+                            DiscoveredEndpoint(
+                                method="POST",
+                                url=candidate,
+                                path="/graphql",
+                                content_type=ct,
+                                source=self.name,
+                            )
+                        )
+                        try:
+                            introspection_body = '{"query":"{__schema{queryType{name}}}"}'
+                            gql_r = await self._safe_request(
+                                client,
+                                "POST",
+                                candidate,
+                                scope=scope,
+                                limiter=limiter,
+                                headers={**merged_headers, "Content-Type": "application/json"},
+                                content=introspection_body,
+                                cookies=cookies,
+                                follow_redirects=False,
+                            )
+                            if gql_r.status_code == 200 and "__schema" in gql_r.text:
+                                findings.append(
+                                    DiscoveredFinding(
+                                        title="Unauthenticated GraphQL Introspection Enabled",
+                                        severity="medium",
+                                        target_url=candidate,
+                                        cwe_id="CWE-200",
+                                        owasp_category="API8:2023 - Security Misconfiguration",
+                                        cvss_score=5.3,
+                                        description="GraphQL endpoint responds to __schema introspection queries without authentication, exposing full API types and mutations.",
+                                        evidence={"url": candidate, "response_preview": gql_r.text[:400]},
+                                        poc_command=(
+                                            f"curl -s -X POST -H 'Content-Type: application/json' "
+                                            f"-d {shlex.quote(introspection_body)} {shlex.quote(candidate)}"
+                                        ),
+                                        remediation="Disable GraphQL introspection in production environments and require authentication on schema queries.",
+                                        tool_source=self.name,
+                                    )
+                                )
+                        except Exception:
+                            pass
+                    elif r.status_code in (200, 401, 403):
+                        if (
+                            r.status_code == 200
+                            and path in OPENAPI_SPEC_PATHS
+                            and ("json" in ct.lower() or r.text.lstrip().startswith("{"))
+                        ):
                             try:
                                 doc = r.json()
                             except Exception:
@@ -523,6 +593,10 @@ class HttpProbeAdapter(BaseToolAdapter):
                                         for m, op_obj in methods_map.items():
                                             if m.upper() in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
                                                 ep_url = urljoin(base_origin, api_path)
+                                                try:
+                                                    scope.validate_target(ep_url, resolve_dns=False)
+                                                except ScopeViolationError:
+                                                    continue
                                                 b_params: list[str] = []
                                                 if isinstance(op_obj, dict):
                                                     req_b = (((op_obj.get("requestBody") or {}).get("content") or {}).get("application/json") or {}).get("schema") or {}
@@ -548,60 +622,26 @@ class HttpProbeAdapter(BaseToolAdapter):
                                         owasp_category="API9:2023 - Improper Inventory Management",
                                         description=f"Public OpenAPI specification discovered at {candidate} exposing {len(paths_dict)} API path definitions.",
                                         evidence={"url": candidate, "path_count": len(paths_dict)},
-                                        poc_command=f"curl -s '{candidate}' | head -n 40",
+                                        poc_command=f"curl -s {shlex.quote(candidate)}",
                                         remediation="Verify whether unauthenticated API documentation exposure is intentional in production environments.",
                                         tool_source=self.name,
                                     )
                                 )
-                        elif path == "/graphql" and r.status_code in (200, 400):
-                            endpoints.append(
-                                DiscoveredEndpoint(
-                                    method="POST",
-                                    url=candidate,
-                                    path="/graphql",
-                                    content_type=ct,
-                                    source=self.name,
-                                )
-                            )
-                            try:
-                                scope.validate_target(candidate, resolve_dns=False)
-                                await limiter.acquire()
-                                gql_r = await client.post(
-                                    candidate,
-                                    headers=_headers_with_cookies(
-                                        {**merged_headers, "Content-Type": "application/json"},
-                                        cookies,
-                                    ),
-                                    json={"query": "{__schema{queryType{name}}}"},
-                                )
-                                if gql_r.status_code == 200 and "__schema" in gql_r.text:
-                                    findings.append(
-                                        DiscoveredFinding(
-                                            title="Unauthenticated GraphQL Introspection Enabled",
-                                            severity="medium",
-                                            target_url=candidate,
-                                            cwe_id="CWE-200",
-                                            owasp_category="API8:2023 - Security Misconfiguration",
-                                            cvss_score=5.3,
-                                            description="GraphQL endpoint responds to __schema introspection queries without authentication, exposing full API types and mutations.",
-                                            evidence={"url": candidate, "response_preview": gql_r.text[:400]},
-                                            poc_command=f"curl -s -X POST -H 'Content-Type: application/json' -d '{{\"query\":\"{{__schema{{queryType{{name}}}}}}\"}}' '{candidate}'",
-                                            remediation="Disable GraphQL introspection in production environments and require authentication on schema queries.",
-                                            tool_source=self.name,
-                                        )
-                                    )
-                            except Exception:
-                                pass
                         elif r.status_code == 200 and path == "/robots.txt":
                             for line in r.text.splitlines():
                                 line = line.strip()
                                 if line.lower().startswith(("disallow:", "allow:")):
                                     p = line.split(":", 1)[1].strip()
                                     if p.startswith("/") and "*" not in p:
+                                        rob_url = urljoin(base_origin, p)
+                                        try:
+                                            scope.validate_target(rob_url, resolve_dns=False)
+                                        except ScopeViolationError:
+                                            continue
                                         endpoints.append(
                                             DiscoveredEndpoint(
                                                 method="GET",
-                                                url=urljoin(base_origin, p),
+                                                url=rob_url,
                                                 path=p,
                                                 source="robots_txt",
                                             )
@@ -671,7 +711,7 @@ class HttpProbeAdapter(BaseToolAdapter):
                                 cvss_score=5.3,
                                 description="GraphQL endpoint exposes full __schema metadata including Query and Mutation fields.",
                                 evidence={"url": gurl, "schema_preview": r_schema.text[:500]},
-                                poc_command=f"curl -s -X POST -H 'Content-Type: application/json' -d '{full_q}' '{gurl}'",
+                                poc_command=f"curl -s -X POST -H 'Content-Type: application/json' -d {shlex.quote(full_q)} {shlex.quote(gurl)}",
                                 remediation="Disable GraphQL introspection in production environments.",
                                 tool_source=self.name,
                             )
@@ -695,7 +735,7 @@ class HttpProbeAdapter(BaseToolAdapter):
                                     cvss_score=3.7,
                                     description="GraphQL returns 'Did you mean' schema field hints on invalid queries even if full introspection is disabled.",
                                     evidence={"response_preview": r_ora.text[:400]},
-                                    poc_command=f"curl -s -X POST -H 'Content-Type: application/json' -d '{oracle_q}' '{gurl}'",
+                                    poc_command=f"curl -s -X POST -H 'Content-Type: application/json' -d {shlex.quote(oracle_q)} {shlex.quote(gurl)}",
                                     remediation="Disable verbose field-suggestion error hints in production GraphQL validation.",
                                     tool_source=self.name,
                                 )
@@ -719,7 +759,7 @@ class HttpProbeAdapter(BaseToolAdapter):
                                 cvss_score=3.8,
                                 description="GraphQL accepts batched JSON operation arrays in a single HTTP request, which can amplify brute-force or resource exhaustion unless depth/cost limits are enforced.",
                                 evidence={"batch_response_preview": r_batch.text[:300]},
-                                poc_command=f"curl -s -X POST -H 'Content-Type: application/json' -d '{batch_q}' '{gurl}'",
+                                poc_command=f"curl -s -X POST -H 'Content-Type: application/json' -d {shlex.quote(batch_q)} {shlex.quote(gurl)}",
                                 remediation="Disable query batching or enforce strict per-operation complexity/rate quotas.",
                                 tool_source=self.name,
                             )
@@ -756,7 +796,7 @@ class HttpProbeAdapter(BaseToolAdapter):
                                         cvss_score=5.3,
                                         description="OAuth discovery metadata advertises deprecated implicit token response_types.",
                                         evidence={"response_types_supported": resp_types},
-                                        poc_command=f"curl -s '{wurl}'",
+                                        poc_command=f"curl -s {shlex.quote(wurl)}",
                                         remediation="Migrate clients to Authorization Code + PKCE (S256) and disable implicit response types.",
                                         tool_source=self.name,
                                     )
@@ -772,7 +812,7 @@ class HttpProbeAdapter(BaseToolAdapter):
                                         cvss_score=3.7,
                                         description="OIDC discovery does not advertise S256 PKCE code_challenge_methods_supported.",
                                         evidence={"code_challenge_methods_supported": pkce_methods},
-                                        poc_command=f"curl -s '{wurl}'",
+                                        poc_command=f"curl -s {shlex.quote(wurl)}",
                                         remediation="Require PKCE with S256 for public and confidential OAuth 2.0/2.1 clients.",
                                         tool_source=self.name,
                                     )
@@ -802,7 +842,7 @@ class HttpProbeAdapter(BaseToolAdapter):
                                 cvss_score=7.4,
                                 description="OAuth authorization endpoint redirected to an unallowlisted redirect_uri without strict exact matching.",
                                 evidence={"location": loc, "status_code": ra.status_code},
-                                poc_command=f"curl -I -s '{test_auth}'",
+                                poc_command=f"curl -I -s {shlex.quote(test_auth)}",
                                 remediation="Enforce exact string matching against pre-registered redirect_uri values and require unguessable state parameters.",
                                 tool_source=self.name,
                             )
@@ -857,7 +897,7 @@ class HttpProbeAdapter(BaseToolAdapter):
                                 "secondary_mode": "multi_role" if scope.has_secondary_auth else "unauth",
                                 "response_preview": unauth_resp.text[:400],
                             },
-                            poc_command=f"curl -i -s '{target}'",
+                            poc_command=f"curl -i -s {shlex.quote(target)}",
                             remediation="Enforce server-side session authentication and object-level ownership checks on every API route.",
                             tool_source=self.name,
                         )
@@ -865,11 +905,19 @@ class HttpProbeAdapter(BaseToolAdapter):
 
             elif args.mode == "jwt_active_probe":
                 raw_tok = args.token
+                token_cookie_key: str | None = None
                 if not raw_tok:
                     for hv in merged_headers.values():
                         m = JWT_RE.search(str(hv))
                         if m:
                             raw_tok = m.group(0)
+                            break
+                if not raw_tok:
+                    for ck_k, ck_v in cookies.items():
+                        m = JWT_RE.search(str(ck_v))
+                        if m:
+                            raw_tok = m.group(0)
+                            token_cookie_key = ck_k
                             break
                 if raw_tok and len(raw_tok.split(".")) == 3:
                     findings.extend(audit_jwt_candidates([raw_tok], final_url, self.name))
@@ -879,11 +927,18 @@ class HttpProbeAdapter(BaseToolAdapter):
                         ("alg:none", f"{none_hdr}.{p_b64}."),
                         ("stripped-signature", f"{raw_tok.split('.')[0]}.{p_b64}."),
                     ]:
-                        test_hdrs = {k: v for k, v in merged_headers.items() if k.lower() != "authorization"}
-                        test_hdrs["Authorization"] = f"Bearer {forged}"
+                        if token_cookie_key:
+                            test_hdrs = dict(merged_headers)
+                            test_cookies = {**cookies, token_cookie_key: forged}
+                            poc_hdr = f"Cookie: {token_cookie_key}={none_hdr}.<payload>."
+                        else:
+                            test_hdrs = {k: v for k, v in merged_headers.items() if k.lower() != "authorization"}
+                            test_hdrs["Authorization"] = f"Bearer {forged}"
+                            test_cookies = cookies
+                            poc_hdr = f"Authorization: Bearer {none_hdr}.<payload>."
                         rj = await self._safe_request(
                             client, args.method, target, scope=scope, limiter=limiter,
-                            headers=test_hdrs, content=args.body, cookies=cookies, follow_redirects=False,
+                            headers=test_hdrs, content=args.body, cookies=test_cookies, follow_redirects=False,
                         )
                         sim = difflib.SequenceMatcher(None, resp.text[:2000], rj.text[:2000]).ratio()
                         if resp.status_code in range(200, 300) and rj.status_code in range(200, 300) and sim >= 0.85:
@@ -896,8 +951,13 @@ class HttpProbeAdapter(BaseToolAdapter):
                                     owasp_category="API2:2023 - Broken Authentication",
                                     cvss_score=9.4,
                                     description=f"Endpoint accepted modified JWT ({label}) returning HTTP {rj.status_code} matching primary response ({round(sim * 100, 1)}%).",
-                                    evidence={"variant": label, "status_code": rj.status_code, "similarity": round(sim, 3)},
-                                    poc_command=f"curl -i -s -H 'Authorization: Bearer {none_hdr}.<payload>.' '{target}'",
+                                    evidence={
+                                        "variant": label,
+                                        "source": f"cookie:{token_cookie_key}" if token_cookie_key else "header",
+                                        "status_code": rj.status_code,
+                                        "similarity": round(sim, 3),
+                                    },
+                                    poc_command=f"curl -i -s -H {shlex.quote(poc_hdr)} {shlex.quote(target)}",
                                     remediation="Validate JWT signatures using an explicit server-configured algorithm allowlist and reject empty signatures or alg=none.",
                                     tool_source=self.name,
                                 )
@@ -905,8 +965,8 @@ class HttpProbeAdapter(BaseToolAdapter):
                             break
 
             elif args.mode == "bfla_verb_tamper":
-                # Test whether alternate HTTP methods bypass authorization controls
-                verbs = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
+                # Test whether alternate HTTP methods bypass authorization controls (OPTIONS excluded: CORS/preflight)
+                verbs = ["GET", "POST", "PUT", "PATCH", "DELETE"]
                 sec_hdrs = {"User-Agent": "AegisPT-SecurityProbe/0.2", **(scope.secondary_headers or {})}
                 sec_ck = dict(scope.secondary_cookies) if scope.has_secondary_auth else {}
                 allowed_verbs: list[str] = []
@@ -918,6 +978,7 @@ class HttpProbeAdapter(BaseToolAdapter):
                     if rv.status_code in range(200, 300) and len(rv.text.strip()) > 0:
                         allowed_verbs.append(f"{verb}:{rv.status_code}")
                 if resp.status_code in {401, 403} and allowed_verbs:
+                    first_verb = allowed_verbs[0].split(":")[0]
                     findings.append(
                         DiscoveredFinding(
                             title="Inconsistent HTTP Method Authorization (Verb Tampering / BFLA)",
@@ -928,7 +989,7 @@ class HttpProbeAdapter(BaseToolAdapter):
                             cvss_score=7.2,
                             description=f"Endpoint rejected {args.method} ({resp.status_code}) but succeeded on alternate verb(s): {', '.join(allowed_verbs)}.",
                             evidence={"baseline_status": resp.status_code, "accepted_verbs": allowed_verbs},
-                            poc_command=f"curl -i -X {allowed_verbs[0].split(':')[0]} '{target}'",
+                            poc_command=f"curl -i -X {shlex.quote(first_verb)} {shlex.quote(target)}",
                             remediation="Apply role/authorization middleware uniformly across all HTTP methods at the router level.",
                             tool_source=self.name,
                         )
@@ -954,6 +1015,7 @@ class HttpProbeAdapter(BaseToolAdapter):
                 if args.method in {"POST", "PUT", "PATCH", "DELETE"} and ok_2xx > 1 and any(
                     k in final_url.lower() for k in ("coupon", "redeem", "transfer", "withdraw", "vote", "apply", "checkout", "verify")
                 ):
+                    burst_targets = " ".join(shlex.quote(target) for _ in range(int(args.burst_count)))
                     findings.append(
                         DiscoveredFinding(
                             title="Potential Concurrency / Idempotency Race Condition (TOCTOU)",
@@ -967,7 +1029,10 @@ class HttpProbeAdapter(BaseToolAdapter):
                                 f"{ok_2xx}/{len(codes)} returned HTTP 2xx concurrently without conflict/lock rejection."
                             ),
                             evidence={"burst_count": args.burst_count, "status_codes": codes, "success_count": ok_2xx},
-                            poc_command=f"seq 1 {args.burst_count} | xargs -P{args.burst_count} -I{{}} curl -s -o /dev/null -w '%{{http_code}}\\n' -X {args.method} '{target}'",
+                            poc_command=(
+                                f"curl --parallel --parallel-max {int(args.burst_count)} -s -o /dev/null "
+                                f"-w '%{{http_code}}\\n' -X {shlex.quote(args.method)} {burst_targets}"
+                            ),
                             remediation="Wrap state transitions in serializable database transactions or idempotency keys.",
                             tool_source=self.name,
                         )
@@ -995,7 +1060,7 @@ class HttpProbeAdapter(BaseToolAdapter):
                                 owasp_category="A03:2021 - Injection",
                                 description=f"Duplicate parameter '{first_k}' influenced response body via second occurrence.",
                                 evidence={"probe_url": hpp_url, "status_code": rh.status_code},
-                                poc_command=f"curl -s '{hpp_url}'",
+                                poc_command=f"curl -s {shlex.quote(hpp_url)}",
                                 remediation="Reject duplicate query parameter occurrences or validate canonicalized parameter cardinality.",
                                 tool_source=self.name,
                             )
@@ -1022,7 +1087,7 @@ class HttpProbeAdapter(BaseToolAdapter):
                                     cvss_score=3.7,
                                     description="Endpoint accepted application/x-www-form-urlencoded where JSON schema was expected (potential CSRF/validation bypass risk).",
                                     evidence={"status_code": rf.status_code},
-                                    poc_command=f"curl -i -X {args.method} -H 'Content-Type: application/x-www-form-urlencoded' '{target}'",
+                                    poc_command=f"curl -i -X {shlex.quote(args.method)} -H 'Content-Type: application/x-www-form-urlencoded' {shlex.quote(target)}",
                                     remediation="Enforce strict Content-Type validation (reject non-application/json payloads with HTTP 415).",
                                     tool_source=self.name,
                                 )
@@ -1060,7 +1125,7 @@ class HttpProbeAdapter(BaseToolAdapter):
                                     cvss_score=9.4,
                                     description=f"Benign mathematical expression `{payload}` ({family}) evaluated to `1850` in server response.",
                                     evidence={"parameter": pname, "family": family, "payload": payload, "probe_url": test_url},
-                                    poc_command=f"curl -s '{test_url}'",
+                                    poc_command=f"curl -s {shlex.quote(test_url)}",
                                     remediation="Avoid passing untrusted input into template compilation; use logic-less templates or strict context escaping.",
                                     tool_source=self.name,
                                 )
@@ -1099,7 +1164,7 @@ class HttpProbeAdapter(BaseToolAdapter):
                                 cvss_score=5.4,
                                 description=f"Endpoint redirected Location header to external domain via parameter '{pname}'.",
                                 evidence={"parameter": pname, "location": loc, "status_code": r_redir.status_code},
-                                poc_command=f"curl -I -s '{test_url}' | grep -i location",
+                                poc_command=f"curl -I -s {shlex.quote(test_url)}",
                                 remediation="Validate redirect destinations against a strict server-side allowlist of relative paths or trusted domains.",
                                 tool_source=self.name,
                             )

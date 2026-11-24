@@ -1,5 +1,29 @@
 #!/usr/bin/env bash
 set -euo pipefail
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+resolve_script_path() {
+  local src="$1"
+  if command -v readlink >/dev/null 2>&1 && readlink -f "$src" >/dev/null 2>&1; then
+    readlink -f "$src"
+    return
+  fi
+  local dir
+  while [ -L "$src" ]; do
+    dir="$(cd -P "$(dirname "$src")" && pwd)"
+    src="$(readlink "$src")"
+    [[ "$src" != /* ]] && src="${dir}/${src}"
+  done
+  dir="$(cd -P "$(dirname "$src")" && pwd)"
+  printf '%s/%s\n' "$dir" "$(basename "$src")"
+}
+
+SCRIPT_PATH="$(resolve_script_path "${BASH_SOURCE[0]}")"
+ROOT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
 export PYTHONPATH="${ROOT_DIR}/backend:${ROOT_DIR}/cli${PYTHONPATH:+:${PYTHONPATH}}"
-exec python3 -m aegispt_cli.main "$@"
+
+PYTHON_BIN="python3"
+if [ -x "${ROOT_DIR}/.venv/bin/python3" ]; then
+  PYTHON_BIN="${ROOT_DIR}/.venv/bin/python3"
+fi
+
+exec "$PYTHON_BIN" -m aegispt_cli.main "$@"
