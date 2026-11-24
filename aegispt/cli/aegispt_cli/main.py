@@ -1493,18 +1493,45 @@ def setup(
     default_target, template_env = default_env_path()
     target_env = env_path or default_target
 
-    chosen = (provider or "").strip().lower()
+    mode_aliases = {
+        "1": "cloud",
+        "cloud": "cloud",
+        "2": "local",
+        "local": "local",
+        "3": "offline",
+        "offline": "offline",
+    }
+    raw_provider = (provider or "").strip()
+    chosen = mode_aliases.get(raw_provider.lower(), "")
+    if not chosen and len(raw_provider) >= 16 and not any(ch.isspace() for ch in raw_provider):
+        chosen = "cloud"
+        if api_key is None:
+            api_key = raw_provider
+
     if chosen not in {"cloud", "local", "offline"}:
         console.print(
             Panel(
                 "[bold]1) cloud[/bold]   — Ollama Cloud (https://ollama.com + API key, 0 MB local RAM)\n"
                 "[bold]2) local[/bold]   — Lightweight Local Ollama (qwen2.5:1.5b + 3b for 7.5-8 GB RAM)\n"
-                "[bold]3) offline[/bold] — Zero-LLM Deterministic OWASP + Skill Pack Planner",
+                "[bold]3) offline[/bold] — Zero-LLM Deterministic OWASP + Skill Pack Planner\n"
+                "[dim](Tip: Press Enter or type 1 for cloud, or paste your Ollama Cloud API Key directly)[/dim]",
                 title="AegisPT AI Setup Modes",
                 border_style="cyan",
             )
         )
-        chosen = Prompt.ask("Choose mode", choices=["cloud", "local", "offline"], default="cloud")
+        while chosen not in {"cloud", "local", "offline"}:
+            ans = Prompt.ask("Choose mode [1=cloud, 2=local, 3=offline, or paste API key]", default="cloud").strip()
+            mapped = mode_aliases.get(ans.lower(), "")
+            if mapped:
+                chosen = mapped
+                break
+            if len(ans) >= 16 and not any(ch.isspace() for ch in ans):
+                chosen = "cloud"
+                if api_key is None:
+                    api_key = ans
+                console.print("[cyan]Detected pasted API key — selecting Ollama Cloud mode automatically.[/cyan]")
+                break
+            console.print("[yellow]Please enter 1 (cloud), 2 (local), 3 (offline), or paste your API key.[/yellow]")
 
     stdin_key = sys.stdin.read().strip() if api_key_stdin else None
 
@@ -1515,7 +1542,7 @@ def setup(
         elif api_key is not None:
             resolved_key = api_key
         else:
-            resolved_key = Prompt.ask("Ollama Cloud API Key", password=True)
+            resolved_key = Prompt.ask("Paste your Ollama Cloud API Key").strip()
         resolved_fast = fast_model or "qwen3-next:80b"
         resolved_reason = reasoning_model or "qwen3-coder:480b"
         llm_mode = "auto"

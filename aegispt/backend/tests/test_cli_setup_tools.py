@@ -85,3 +85,25 @@ def test_cli_setup_offline_api_key_stdin_and_tools_commands(tmp_path: Path):
 
     res_bad_tier = runner.invoke(app, ["tools", "--tier", "4"])
     assert res_bad_tier.exit_code != 0
+
+    # Pasting an API key directly into the initial 'Choose mode' prompt auto-selects cloud mode
+    direct_key_env = tmp_path / ".env.direct_key"
+    res_direct = runner.invoke(
+        app,
+        ["setup", "--env-path", str(direct_key_env), "--no-verify"],
+        input="my_ollama_cloud_api_key_1234567890\n",
+    )
+    assert res_direct.exit_code == 0, res_direct.output
+    direct_content = direct_key_env.read_text(encoding="utf-8")
+    assert "AEGISPT_OLLAMA_URL=https://ollama.com" in direct_content
+    assert "AEGISPT_OLLAMA_API_KEY=my_ollama_cloud_api_key_1234567890" in direct_content
+
+    # Typing numeric '2' selects local mode
+    num_local_env = tmp_path / ".env.num_local"
+    res_num = runner.invoke(
+        app,
+        ["setup", "--env-path", str(num_local_env), "--no-verify"],
+        input="2\n",
+    )
+    assert res_num.exit_code == 0, res_num.output
+    assert "AEGISPT_OLLAMA_URL=http://127.0.0.1:11434" in num_local_env.read_text(encoding="utf-8")
