@@ -6,7 +6,7 @@
 
 Built for Kali Linux with allowlist-only scope enforcement, 3-tier human-in-the-loop approval gates, 24 typed security tool adapters, modular offensive skill packs, and a real-time Web Dashboard + CLI.
 
-[![CI](https://github.com/willygailo/AI-ko/actions/workflows/ci.yml/badge.svg)](./.github/workflows/ci.yml)
+[![CI](https://github.com/willygailo/AI-ko/actions/workflows/ci.yml/badge.svg)](https://github.com/willygailo/AI-ko/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115%2B-009688?style=for-the-badge&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
 [![React](https://img.shields.io/badge/React-18%20%2B%20TypeScript-61DAFB?style=for-the-badge&logo=react&logoColor=black)](https://react.dev/)
@@ -173,14 +173,20 @@ cp .env.example .env
 ```
 
 <details>
-<summary>Optional: Install <code>aegispt</code> Globally & Enable Shell Completion</summary>
+<summary>Optional: Virtualenv Setup, Playwright SPA Extra &amp; Global CLI Install</summary>
 
-The [`./aegispt`](./aegispt/aegispt) launcher works out of the box from `aegispt/` without installing anything globally. To invoke `aegispt` or `python -m aegispt_cli.main` from any directory and enable shell completion:
+The [`./aegispt`](./aegispt/aegispt) launcher automatically prefers `aegispt/.venv/bin/python3` when present and works even when symlinked (e.g., `/usr/local/bin/aegispt`). For an isolated virtualenv install (recommended on clean Python 3.11+ hosts):
 
 ```bash
 cd aegispt
-pip install --user --break-system-packages --no-build-isolation --no-deps -e .
-aegispt --install-completion
+python3 -m venv .venv
+.venv/bin/pip install -e ".[dev]"
+
+# Optional: enable headless Chromium SPA inspection (`spa_inspector`)
+.venv/bin/pip install -e ".[spa]" && .venv/bin/playwright install chromium
+
+# Optional: enable shell tab completion
+./aegispt --install-completion
 ```
 
 </details>
@@ -258,12 +264,15 @@ Create a scoped engagement (using `--url`, optional `--domain` for host/subdomai
 ./aegispt checklist
 ./aegispt chains
 ./aegispt findings
+./aegispt findings triage <finding_id> --status confirmed
+./aegispt findings reverify <finding_id>
 ./aegispt diff
 ./aegispt repeat latest http://127.0.0.1:3000/api/Products
 
-# 6. Export HTML/JSON reports & shell-safe PoC replay script
+# 6. Export HTML/Markdown/SARIF/JSON reports & shell-safe PoC replay script
 ./aegispt report --format html --out report.html
 ./aegispt report --format json --out report.json
+./aegispt report --format sarif --out report.sarif
 ./aegispt report --format poc_sh --out verify_findings.sh
 ```
 
@@ -280,13 +289,14 @@ Create a scoped engagement (using `--url`, optional `--domain` for host/subdomai
 │   ├── PULL_REQUEST_TEMPLATE.md
 │   └── workflows/ci.yml                # GitHub Actions CI (backend, frontend, security)
 ├── .gitignore
+├── .gitleaksignore                     # Allowlist for known synthetic test-fixture fingerprints
 ├── .pre-commit-config.yaml             # Ruff + pre-commit hygiene & private-key hooks
 ├── Makefile                            # Root DevEx entrypoints (check, lint, test, build-ui, dev)
 ├── README.md
 ├── CONTRIBUTING.md / CODE_OF_CONDUCT.md / SECURITY.md
 └── aegispt/
-    ├── aegispt                         # CLI launcher script (./aegispt)
-    ├── pyproject.toml                  # Python project, extras & entrypoint metadata
+    ├── aegispt                         # Symlink- & .venv-aware CLI launcher script (./aegispt)
+    ├── pyproject.toml                  # Dependencies, extras, Ruff/Pytest/Pyrefly/Pyright config
     ├── .env.example                    # Complete environment configuration template
     ├── README.md                       # Subproject Quick Start
     ├── TOOLS_AND_SETUP.md              # AI backend setup & 24-tool operator guide
@@ -344,7 +354,7 @@ Create a scoped engagement (using `--url`, optional `--domain` for host/subdomai
 <summary><strong>Authentication & REST / WebSocket Endpoints</strong></summary>
 
 - **REST Authentication**: All `/api/v1/*` routes (except `/api/v1/system/health` and the lab `/oob/*` callback catcher) require header authentication via `Authorization: Bearer <token>` (or `X-API-Key: <token>`). Query-parameter `?token=` authentication is disabled on REST endpoints to prevent secret leakage in access logs and browser history.
-- **WebSocket Authentication**: `WS /ws/engagements/{id}` accepts `Authorization: Bearer <token>` headers (used by the CLI and API clients) or a short-lived, single-use `?ticket=<ticket>` issued by `POST /api/v1/system/ws-ticket` (used by the React Web Dashboard).
+- **WebSocket Authentication**: `WS /api/v1/engagements/{id}/ws` (and legacy alias `WS /ws/engagements/{id}`) accepts `Authorization: Bearer <token>` headers (used by the CLI and API clients) or a short-lived, single-use `?ticket=<ticket>` issued by `POST /api/v1/system/ws-ticket` (used by the React Web Dashboard).
 
 | Group | Endpoints |
 | :--- | :--- |
@@ -353,7 +363,7 @@ Create a scoped engagement (using `--url`, optional `--domain` for host/subdomai
 | **Engagements & Steering** | `GET/POST /api/v1/engagements`, `GET/DELETE /api/v1/engagements/{id}`, `POST /api/v1/engagements/{id}/{start\|pause\|resume\|stop\|steer\|run-tool\|repeater\|snapshots\|chains/synthesize}`, `GET /api/v1/engagements/{id}/diff`, `GET /api/v1/engagements/{id}/runs/{run_id}/log` |
 | **Local Lab OOB** | `ANY /oob/{engagement_id}/{token}`, `GET /api/v1/engagements/{id}/oob` |
 | **Approvals, Hypotheses & Findings** | `GET /api/v1/engagements/{id}/approvals`, `POST /api/v1/approvals/{approval_id}/decide`, `GET /api/v1/engagements/{id}/hypotheses`, `PATCH /api/v1/hypotheses/{id}`, `GET/POST /api/v1/engagements/{id}/findings`, `PATCH /api/v1/findings/{finding_id}`, `POST /api/v1/findings/{finding_id}/reverify` |
-| **Reports & Stream** | `GET /api/v1/engagements/{id}/report?format=html\|markdown\|sarif\|json\|poc_sh`, `WS /ws/engagements/{id}` (`Authorization: Bearer` header or `?ticket=<single-use-ticket>`) |
+| **Reports & Stream** | `GET /api/v1/engagements/{id}/report?format=html\|markdown\|sarif\|json\|poc_sh` (and `/reports/{format}`), `WS /api/v1/engagements/{id}/ws` (`Authorization: Bearer` header or `?ticket=<single-use-ticket>`) |
 
 </details>
 
@@ -377,7 +387,10 @@ cd aegispt && ruff check backend cli && pytest -v
 cd aegispt/frontend && pnpm typecheck && pnpm lint && pnpm test && pnpm build
 ```
 
-Automated CI (`.github/workflows/ci.yml`) runs on every push to `main` and pull request, verifying scope allowlists & DNS boundary checks, security hardening regressions, SQLite persistence & schema migration, 3-tier approval workflows, all 24 tool adapters/native probes, LLM routing + failover + secret redaction, attack-chain synthesis, CLI commands, REST/WebSocket auth, frontend unit tests/build, shell scripts, and secret scanning.
+Automated CI ([`.github/workflows/ci.yml`](./.github/workflows/ci.yml)) runs on every push to `main` and pull request across three jobs:
+- **Backend, CLI & Shell Checks**: Python 3.12 editable install (`pip install -e "./aegispt[dev]"`), Ruff lint & import sorting (`E4`, `E7`, `E9`, `F`, `I`), the full backend/security/tool/CLI `pytest` suite, and `shellcheck` on launcher/setup scripts.
+- **Frontend Typecheck, Lint, Test & Build**: Node 24 + pnpm frozen install, strict `tsc --noEmit`, AST lint checks, Node 24 unit tests, and Vite production bundle build.
+- **Secret Scan & Lab Compose Validation**: Gitleaks secret scanning (`gitleaks/gitleaks-action@v2`) and `docker compose` validation of the hardened Juice Shop lab.
 
 ---
 
