@@ -54,3 +54,9 @@ src = ["backend", "cli"]
 
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.pyrefly]
+search-path = ["backend", "cli"]
+
+[tool.pyright]
+extraPaths = ["backend", "cli"]
