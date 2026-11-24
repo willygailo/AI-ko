@@ -649,7 +649,11 @@ def test_operator_parity_commands(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     assert snap_call[2]["params"] == {"label": "pre-fix"}
 
     assert runner.invoke(app, ["findings"]).exit_code == 0
-    assert runner.invoke(app, ["findings", "eng-1"]).exit_code == 0
+    res_findings_eng = runner.invoke(app, ["findings", "eng-1"])
+    assert res_findings_eng.exit_code == 0, res_findings_eng.output
+    res_findings_eng_sev = runner.invoke(app, ["findings", "eng-1", "--severity", "high"])
+    assert res_findings_eng_sev.exit_code == 0, res_findings_eng_sev.output
+    assert runner.invoke(app, ["findings", "--help"]).exit_code == 0
     assert runner.invoke(app, ["findings", "list", "--severity", "high"]).exit_code == 0
     res_triage = runner.invoke(
         app, ["findings", "triage", "f-1", "--status", "confirmed", "--severity", "critical"]

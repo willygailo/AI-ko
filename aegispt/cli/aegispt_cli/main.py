@@ -34,15 +34,23 @@ from aegispt_cli.client import (
 class DefaultListGroup(typer.core.TyperGroup):
     """Allow explicit subcommands while defaulting unknown positional args to `list`."""
 
+    def _rewrite_default_list(self, ctx: click.Context, args: list[str]) -> list[str]:
+        if args and not args[0].startswith("-") and "list" in self.commands:
+            cmd_name = args[0]
+            cmd = self.get_command(ctx, cmd_name)
+            if cmd is None and ctx.token_normalize_func is not None:
+                cmd = self.get_command(ctx, ctx.token_normalize_func(cmd_name))
+            if cmd is None:
+                return ["list", *args]
+        return args
+
+    def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
+        return super().parse_args(ctx, self._rewrite_default_list(ctx, args))
+
     def resolve_command(
         self, ctx: click.Context, args: list[str]
     ) -> tuple[str | None, click.Command | None, list[str]]:
-        try:
-            return super().resolve_command(ctx, args)
-        except click.UsageError:
-            if args and not args[0].startswith("-") and "list" in self.commands:
-                return super().resolve_command(ctx, ["list", *args])
-            raise
+        return super().resolve_command(ctx, self._rewrite_default_list(ctx, args))
 
 
 app = typer.Typer(name="aegispt", help="AegisPT — Private AI Web & API Penetration Testing CLI")
@@ -65,10 +73,10 @@ llm_profiles_app = typer.Typer(
 )
 
 app.add_typer(engagement_app, name="engagement")
-app.add_typer(findings_app, name="findings")
-app.add_typer(approvals_app, name="approvals")
-app.add_typer(snapshots_app, name="snapshots")
-app.add_typer(llm_profiles_app, name="llm-profiles")
+app.add_typer(findings_app, name="findings", cls=DefaultListGroup)
+app.add_typer(approvals_app, name="approvals", cls=DefaultListGroup)
+app.add_typer(snapshots_app, name="snapshots", cls=DefaultListGroup)
+app.add_typer(llm_profiles_app, name="llm-profiles", cls=DefaultListGroup)
 
 console = Console()
 err_console = Console(stderr=True)
