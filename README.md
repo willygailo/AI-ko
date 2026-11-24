@@ -81,9 +81,23 @@ The [`./aegispt`](./aegispt/aegispt) launcher automatically prefers `aegispt/.ve
 
 </details>
 
-### Step 2: Configure Your AI Provider (`.env`)
+### Step 2: Build the Web Dashboard UI
 
-Copy the template and run the interactive setup wizard:
+```bash
+cd frontend
+pnpm install --frozen-lockfile
+pnpm build
+cd ..
+```
+
+This builds `aegispt/frontend/dist/`, which the FastAPI server mounts automatically at `http://127.0.0.1:8443`.
+
+### Step 3: Configure Your AI Provider (Web UI or Optional `.env` Wizard)
+
+> [!TIP]
+> **Easiest Way (Web Dashboard)**: You can skip editing `.env`—just run `./aegispt serve`, sign in at `http://127.0.0.1:8443`, and click **`API Key / AI Settings`** in the top bar to paste your **Ollama Cloud** (or OpenAI-compatible) API key.
+
+If you prefer configuring via the terminal before starting the server:
 
 ```bash
 cp .env.example .env
@@ -112,17 +126,6 @@ Choose whichever mode fits your machine:
   ./aegispt setup --provider offline
   ```
   Sets `AEGISPT_LLM_MODE=offline` to run deterministic OWASP WSTG + Skill Pack planning with zero outbound LLM requests.
-
-### Step 3: Build the Web Dashboard UI
-
-```bash
-cd frontend
-pnpm install --frozen-lockfile
-pnpm build
-cd ..
-```
-
-This builds `aegispt/frontend/dist/`, which the FastAPI server mounts automatically at `http://127.0.0.1:8443`.
 
 ### Step 4: Verify Your Environment
 
@@ -401,7 +404,7 @@ sequenceDiagram
 | `AEGISPT_PORT` | `8443` | HTTP / WebSocket server port |
 | `AEGISPT_SERVER_URL` | `""` | Optional CLI override when targeting a non-default server URL |
 | `AEGISPT_API_TOKEN` | _(auto-generated)_ | Fixed bearer token; if blank, created atomically (`0600`) in `data/.api_token` |
-| `AEGISPT_PRINT_TOKEN` | `0` | Set to `1` to print the raw bearer token on `./aegispt serve` startup (default `0` hides it; use `./aegispt token`) |
+| `AEGISPT_PRINT_TOKEN` | `1` *(via `./aegispt serve`)* | `./aegispt serve` prints the copy-pasteable `aegis_...` token by default; set `AEGISPT_PRINT_TOKEN=0` or pass `--hide-token` to suppress it |
 | `AEGISPT_DATA_DIR` | `./data` | Storage directory (`0700`) for SQLite DBs, vault keys, logs, and tool artifacts |
 | `AEGISPT_LLM_MODE` | `auto` | LLM mode: `auto` (use configured provider) or `offline` (disable all outbound LLM calls) |
 | `AEGISPT_OLLAMA_URL` | `http://127.0.0.1:11434` | Local Ollama or Ollama Cloud (`https://ollama.com`) endpoint |
@@ -460,8 +463,8 @@ cd aegispt/frontend && pnpm typecheck && pnpm lint && pnpm test && pnpm build
 ```
 
 Automated CI ([`.github/workflows/ci.yml`](./.github/workflows/ci.yml)) runs on every push to `main` and pull request across three jobs:
-- **Backend, CLI & Shell Checks**: Python 3.12 editable install (`pip install -e "./aegispt[dev]"`), Ruff lint & import sorting (`E4`, `E7`, `E9`, `F`, `I`), the full backend/security/tool/CLI `pytest` suite, and `shellcheck` on launcher/setup scripts.
-- **Frontend Typecheck, Lint, Test & Build**: Node 24 + pnpm frozen install, strict `tsc --noEmit`, AST lint checks, Node 24 unit tests, and Vite production bundle build.
+- **Backend, CLI & Shell Checks**: Python 3.12 editable install (`pip install -e "./aegispt[dev]"`), Ruff lint & import sorting (`E4`, `E7`, `E9`, `F`, `I`), the full **75-test** backend/security/tool/CLI `pytest` suite, and `shellcheck` on launcher/setup scripts.
+- **Frontend Typecheck, Lint, Test & Build**: Node 24 + `pnpm` 11 frozen install (`allowBuilds.esbuild: true`), strict `tsc --noEmit`, AST lint checks, **19** Node 24 unit tests, and Vite production bundle build.
 - **Secret Scan & Lab Compose Validation**: Gitleaks secret scanning (`gitleaks/gitleaks-action@v2`) and `docker compose` validation of the hardened Juice Shop lab.
 
 ---

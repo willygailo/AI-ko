@@ -2,6 +2,8 @@
 .env
 .env.*
 !.env.example
+data/
+artifacts/
 aegispt/data/
 aegispt/artifacts/
 .api_token
@@ -74,11 +76,24 @@ gitleaks-results.sarif*
 report.html
 report.md
 report.json
+report.pdf
+*.report.html
+*.report.md
+*.report.json
 verify_findings.sh
 *.poc.sh
 
-# === OS & Editor Artifacts ===
+# === Temp, Backup & Patch Artifacts ===
+*.tmp
+*.bak
+*.orig
+*.rej
+
+# === OS, Editor & AI Assistant Directories ===
 .DS_Store
+.DS_Store?
+.Spotlight-V100
+.Trashes
 Thumbs.db
 Desktop.ini
 *.swp
@@ -87,3 +102,6 @@ Desktop.ini
 .cache/
 .vscode/
 .idea/
+.antigravity/
+.cursor/
+.claude/
