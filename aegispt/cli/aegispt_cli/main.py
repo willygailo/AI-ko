@@ -250,9 +250,11 @@ def doctor(
     json_output: bool = typer.Option(False, "--json", help="Print raw JSON output"),
 ) -> None:
     """Verify installed Kali tools, OWASP playbooks, and LLM endpoint reachability."""
+    data: dict[str, Any]
     with _open_client() as client:
         try:
-            data = client.get("/api/v1/system/doctor").json()
+            resp_json = client.get("/api/v1/system/doctor").json()
+            data = resp_json if isinstance(resp_json, dict) else {}
         except AegisAPIError as exc:
             if not exc.is_connection_error:
                 raise
@@ -264,10 +266,12 @@ def doctor(
             from app.tools.registry import tool_registry
 
             knowledge_store.ensure_indexed()
-            tools_catalog = tool_registry.describe_catalog()
-            llm_status = asyncio.run(llm_router.list_models(default_profile_from_settings()))
+            tools_catalog: list[dict[str, Any]] = list(tool_registry.describe_catalog())
+            llm_status: dict[str, Any] = dict(
+                asyncio.run(llm_router.list_models(default_profile_from_settings()))
+            )
             data = {
-                "tools_available": sum(1 for t in tools_catalog if t["available"]),
+                "tools_available": sum(1 for t in tools_catalog if t.get("available")),
                 "tools_total": len(tools_catalog),
                 "tools": tools_catalog,
                 "llm": llm_status,
@@ -279,29 +283,38 @@ def doctor(
         sys.stdout.flush()
         return
 
-    table = Table(title=f"Kali Tool Adapters ({data['tools_available']}/{data['tools_total']} ready)")
+    table = Table(
+        title=f"Kali Tool Adapters ({data.get('tools_available', 0)}/{data.get('tools_total', 0)} ready)"
+    )
     table.add_column("Tool", style="cyan")
     table.add_column("Tier", justify="center")
     table.add_column("Status")
     table.add_column("Path / Mode", style="dim")
 
-    for t in data["tools"]:
-        status = "[green]READY[/green]" if t["available"] else "[red]MISSING[/red]"
+    raw_tools = data.get("tools")
+    tools_items: list[dict[str, Any]] = (
+        [t for t in raw_tools if isinstance(t, dict)] if isinstance(raw_tools, list) else []
+    )
+    for t in tools_items:
+        status = "[green]READY[/green]" if t.get("available") else "[red]MISSING[/red]"
         table.add_row(
-            escape(str(t["name"])),
-            f"Tier {t['tier']}",
+            escape(str(t.get("name", ""))),
+            f"Tier {t.get('tier', '')}",
             status,
             escape(str(t.get("resolved_path") or "-")),
         )
     console.print(table)
 
-    llm = data["llm"]
+    raw_llm = data.get("llm")
+    llm: dict[str, Any] = raw_llm if isinstance(raw_llm, dict) else {}
     llm_ok = (
         "[green]REACHABLE[/green]"
         if llm.get("reachable")
         else "[yellow]UNREACHABLE (fallback planner active)[/yellow]"
     )
-    models_str = escape(", ".join(llm.get("models") or []) or str(llm.get("error", "none")))
+    raw_models = llm.get("models")
+    model_names = [str(m) for m in raw_models] if isinstance(raw_models, list) else []
+    models_str = escape(", ".join(model_names) or str(llm.get("error", "none")))
     console.print(
         Panel(
             f"Provider: [bold]{escape(str(llm.get('provider')))}[/bold] | URL: {escape(str(llm.get('base_url')))}\n"
