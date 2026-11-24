@@ -11,10 +11,13 @@ help:
 	@echo "  make dev-frontend  Start Vite frontend dev server"
 	@echo "  make check-lab     Validate aegispt/lab/docker-compose.lab.yml"
 
+PYTEST := $(shell if [ -x aegispt/.venv/bin/pytest ]; then echo ".venv/bin/pytest"; else echo "pytest"; fi)
+RUFF := $(shell if [ -x aegispt/.venv/bin/ruff ]; then echo ".venv/bin/ruff"; else echo "ruff"; fi)
+
 test: test-backend test-frontend
 
 test-backend:
-	cd aegispt && pytest -v
+	cd aegispt && $(PYTEST) -v
 
 test-frontend:
 	cd aegispt/frontend && pnpm test
@@ -22,7 +25,7 @@ test-frontend:
 lint: lint-backend lint-frontend lint-shell
 
 lint-backend:
-	cd aegispt && ruff check backend cli
+	cd aegispt && $(RUFF) check backend cli
 
 lint-frontend:
 	cd aegispt/frontend && pnpm typecheck && pnpm lint

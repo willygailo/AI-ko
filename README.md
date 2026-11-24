@@ -138,29 +138,23 @@ This builds `aegispt/frontend/dist/`, which the FastAPI server mounts automatica
 
 ## How to Use
 
-### 1. Start AegisPT & Get Your API Token
-
-From `AI-ko/aegispt/`:
+### 1. Start AegisPT (One Command — Prints Your Token Automatically)
 
 ```bash
+cd aegispt
 ./aegispt serve
 ```
 
-- The Web Dashboard and REST/WebSocket API listen on **`http://127.0.0.1:8443`** (honoring `AEGISPT_HOST`/`AEGISPT_PORT` from `.env`).
-- For security, startup logs mask the bearer token by default (`AEGISPT_PRINT_TOKEN=0`). Retrieve it in another terminal anytime with:
-  ```bash
-  ./aegispt token
-  ```
-
-> [!TIP]
-> For active frontend hot-reload development (`:5173` proxying to `:8443`), run `make dev` from the repository root.
+- Starts the Web Dashboard & REST/WebSocket API on **`http://127.0.0.1:8443`** and **immediately prints your copy-pasteable `aegis_...` Local API Token** right in the terminal (no second terminal needed!).
+- Copy the printed `aegis_...` token line, open **`http://127.0.0.1:8443`**, paste the token, and click **API Key / AI Settings** in the top bar to paste your AI API key.
+- *(Tip: You can also run `./aegispt token` or `./aegispt token --raw` anytime if you ever need to retrieve the token separately, or pass `./aegispt serve --hide-token` to suppress printing it on startup.)*
 
 ---
 
 ### 2. Option A — Use the Web Dashboard (`http://127.0.0.1:8443`)
 
-1. **Sign In**: Open `http://127.0.0.1:8443` and paste the bearer token from `./aegispt token`.
-2. **Verify AI & Tools (Optional)**: Click **Settings** to inspect `doctor` diagnostics, add/delete LLM profiles, or click **Set Default** on any profile.
+1. **Sign In**: Copy the `aegis_...` token printed by `./aegispt serve`, open `http://127.0.0.1:8443`, and click **Paste from Clipboard** (or `Ctrl+V`) → **Connect to Local Engine**.
+2. **Paste Your AI API Key**: Click **API Key / AI Settings** in the top header, paste your **Ollama Cloud** (or OpenAI-compatible) API key into the **API Key** box, and click **Save LLM Profile**.
 3. **Create a Scoped Engagement**: Click **`+ New`** to open the **Scope Wizard**:
    - Enter authorized **Target URLs** / **Allowed Domains** (or click **Load Juice Shop Lab Preset** for local lab practice).
    - Set **Allowed CIDRs**, **Excluded Hosts/Paths**, **Max Steps**, and **Autonomy Mode** (`tiered`, `copilot`, or `lab_autopilot`).
@@ -221,7 +215,7 @@ Run a full scoped assessment from your terminal (`latest` engagement ID is used 
 ./aegispt findings triage <finding_id> --status confirmed
 ./aegispt findings reverify <finding_id>
 ./aegispt diff
-./aegispt repeat latest http://127.0.0.1:3000/api/Products
+./aegispt repeat http://127.0.0.1:3000/api/Products
 
 # 6. Export HTML, JSON, SARIF, or shell-safe PoC replay scripts
 ./aegispt report --format html --out report.html

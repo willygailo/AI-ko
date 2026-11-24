@@ -8,6 +8,7 @@ import {
   clearStoredToken,
   connectEngagementWS,
   getStoredToken,
+  normalizeApiToken,
   parseApiErrorMessage,
   setStoredToken,
   setUnauthorizedHandler,
@@ -111,6 +112,25 @@ describe("api/client error parsing, 401 handling, and WebSocket lifecycle", () =
     );
     assert.equal(parseApiErrorMessage(500, "Plain error"), "500: Plain error");
     assert.equal(parseApiErrorMessage(503, ""), "Request failed with HTTP 503.");
+  });
+
+  it("normalizes pasted API tokens with box borders, Bearer prefix, quotes, or wrapped lines", () => {
+    assert.equal(
+      normalizeApiToken("  │ aegis_AbCdEf123456_xyz-789 │  "),
+      "aegis_AbCdEf123456_xyz-789"
+    );
+    assert.equal(
+      normalizeApiToken("Authorization: Bearer 'aegis_my_token_999'"),
+      "aegis_my_token_999"
+    );
+    assert.equal(
+      normalizeApiToken(
+        "╭─── AegisPT Local API Token ───╮\n│ aegis_wrapped_part1_\n│ part2_end │\n╰───────────────────────────────╯"
+      ),
+      "aegis_wrapped_part1_part2_end"
+    );
+    setStoredToken("  Bearer  │ aegis_stored_clean │ ");
+    assert.equal(getStoredToken(), "aegis_stored_clean");
   });
 
   it("clears token and invokes global unauthorized handler on HTTP 401", async () => {

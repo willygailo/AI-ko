@@ -234,8 +234,13 @@ def test_serve_honors_settings_without_clobbering_env(monkeypatch: pytest.Monkey
         host = "127.0.0.1"
         port = 9443
 
+        @staticmethod
+        def get_or_create_api_token() -> str:
+            return "aegis_dummy_serve_tok"
+
     monkeypatch.delenv("AEGISPT_HOST", raising=False)
     monkeypatch.delenv("AEGISPT_PORT", raising=False)
+    monkeypatch.setattr(cli_main, "resolve_api_token", lambda: "aegis_dummy_serve_tok")
     monkeypatch.setattr("app.config.get_settings", lambda: DummySettings())
     monkeypatch.setattr(
         "uvicorn.run",
@@ -246,8 +251,13 @@ def test_serve_honors_settings_without_clobbering_env(monkeypatch: pytest.Monkey
 
     res = runner.invoke(app, ["serve"])
     assert res.exit_code == 0, res.output
+    assert "aegis_dummy_serve_tok" in res.output
     assert recorded == {"app": "app.main:app", "host": "127.0.0.1", "port": 9443, "reload": False}
     assert "AEGISPT_PORT" not in cli_main.os.environ
+
+    res_hidden = runner.invoke(app, ["serve", "--hide-token"])
+    assert res_hidden.exit_code == 0, res_hidden.output
+    assert "aegis_dummy_serve_tok" not in res_hidden.output
 
     res_override = runner.invoke(app, ["serve", "--host", "127.0.0.2", "--port", "9001"])
     assert res_override.exit_code == 0, res_override.output
@@ -304,6 +314,11 @@ def test_token_command(monkeypatch: pytest.MonkeyPatch) -> None:
     res = runner.invoke(app, ["token"])
     assert res.exit_code == 0, res.output
     assert "aegis_demo_token_xyz" in res.output
+    assert "│" not in res.stdout
+
+    res_raw = runner.invoke(app, ["token", "--raw"])
+    assert res_raw.exit_code == 0, res_raw.output
+    assert res_raw.stdout.strip() == "aegis_demo_token_xyz"
 
 
 def test_doctor_online_offline_fallback_and_no_swallow_on_401(
@@ -716,6 +731,10 @@ def test_operator_parity_commands(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     )
     assert res_rep_full.exit_code == 0, res_rep_full.output
     assert "[not-markup]" in res_rep_full.output
+
+    # Single-arg repeat defaults to 'latest' engagement
+    res_rep_single = runner.invoke(app, ["repeat", "http://127.0.0.1:3000/api"])
+    assert res_rep_single.exit_code == 0, res_rep_single.output
 
     # Report raw stdout (exact, unwrapped JSON; status diagnostic goes to stderr)
     res_rep_stdout = runner.invoke(app, ["report", "latest", "--format", "json"])

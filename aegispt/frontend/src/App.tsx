@@ -2,7 +2,10 @@ import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 
 import {
   Camera,
   Check,
+  ClipboardPaste,
   Copy,
+  Eye,
+  EyeOff,
   FileText,
   GitCompare,
   KeyRound,
@@ -11,6 +14,7 @@ import {
   Play,
   Plus,
   Radio,
+  RefreshCw,
   Search,
   Send,
   Settings,
@@ -21,8 +25,10 @@ import {
   Trash2,
   Wifi,
   WifiOff,
+  X,
 } from "lucide-react";
 import {
+  ApiError,
   type ApprovalItem,
   type Engagement,
   type EngagementDetail,
@@ -34,6 +40,7 @@ import {
   api,
   clearStoredToken,
   getStoredToken,
+  normalizeApiToken,
   setStoredToken,
   setUnauthorizedHandler,
 } from "./api/client";
@@ -76,6 +83,8 @@ const FALLBACK_TOOLS: ToolCatalogItem[] = [
 export default function App() {
   const tokenInputId = useId();
   const [tokenInput, setTokenInput] = useState(getStoredToken());
+  const [showToken, setShowToken] = useState(true);
+  const [engineReachable, setEngineReachable] = useState<"checking" | "online" | "offline">("checking");
   const [authenticated, setAuthenticated] = useState(Boolean(getStoredToken()));
   const [authError, setAuthError] = useState("");
   const [loginBusy, setLoginBusy] = useState(false);
@@ -287,19 +296,79 @@ export default function App() {
 
   const availableTools = toolsCatalog.length > 0 ? toolsCatalog : FALLBACK_TOOLS;
 
+  const checkEngineHealth = useCallback(async () => {
+    if (typeof window !== "undefined" && window.location.protocol === "file:") {
+      setEngineReachable("offline");
+      return false;
+    }
+    setEngineReachable("checking");
+    try {
+      await api.health();
+      setEngineReachable("online");
+      return true;
+    } catch {
+      setEngineReachable("offline");
+      return false;
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!authenticated) {
+      void checkEngineHealth();
+    }
+  }, [authenticated, checkEngineHealth]);
+
+  const handlePasteToken = async () => {
+    setAuthError("");
+    if (typeof navigator !== "undefined" && navigator.clipboard?.readText) {
+      try {
+        const clip = await navigator.clipboard.readText();
+        const cleaned = normalizeApiToken(clip);
+        if (cleaned) {
+          setTokenInput(cleaned);
+          return;
+        }
+      } catch {
+        // Fall through to manual Ctrl+V notice
+      }
+    }
+    setAuthError("Press Ctrl+V (or right-click -> Paste) inside the token box.");
+  };
+
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setAuthError("");
+    const cleaned = normalizeApiToken(tokenInput);
+    setTokenInput(cleaned);
+    if (!cleaned) {
+      setAuthError("Please enter or paste your API token from `./aegispt token`.");
+      return;
+    }
+    if (typeof window !== "undefined" && window.location.protocol === "file:") {
+      setAuthError(
+        "Opened via file://. Start `./aegispt serve` and open http://127.0.0.1:8443 in your browser."
+      );
+      return;
+    }
     setLoginBusy(true);
-    setStoredToken(tokenInput);
+    setStoredToken(cleaned);
     try {
       await api.listEngagements({ skipUnauthorizedHandler: true });
+      setEngineReachable("online");
       setAuthenticated(true);
-    } catch {
+    } catch (err) {
       clearStoredToken();
-      setAuthError(
-        "Token rejected by AegisPT server. Run `./aegispt token` in terminal to get the local token."
-      );
+      if (err instanceof ApiError && err.status === 401) {
+        setEngineReachable("online");
+        setAuthError(
+          "Token rejected (HTTP 401). Run `./aegispt token` in your terminal and paste the exact `aegis_...` line."
+        );
+      } else {
+        setEngineReachable("offline");
+        setAuthError(
+          "Cannot reach AegisPT backend server. Make sure `./aegispt serve` is running and open http://127.0.0.1:8443."
+        );
+      }
     } finally {
       setLoginBusy(false);
     }
@@ -406,54 +475,162 @@ export default function App() {
   }, []);
 
   if (!authenticated) {
+    const isFileProtocol = typeof window !== "undefined" && window.location.protocol === "file:";
     return (
       <div className="min-h-screen flex items-center justify-center bg-slate-950 p-6">
         <form
           onSubmit={(e) => void handleLogin(e)}
           className="w-full max-w-md bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-4 shadow-2xl"
         >
-          <div className="flex items-center gap-3">
-            <div className="p-2.5 rounded-xl bg-cyan-500/15 border border-cyan-500/30">
-              <ShieldCheck className="w-6 h-6 text-cyan-400" aria-hidden="true" />
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="p-2.5 rounded-xl bg-cyan-500/15 border border-cyan-500/30">
+                <ShieldCheck className="w-6 h-6 text-cyan-400" aria-hidden="true" />
+              </div>
+              <div>
+                <h1 className="text-lg font-bold text-white">AegisPT</h1>
+                <p className="text-xs text-slate-400">Private AI Web & API Pentesting Platform</p>
+              </div>
             </div>
-            <div>
-              <h1 className="text-lg font-bold text-white">AegisPT</h1>
-              <p className="text-xs text-slate-400">Private AI Web & API Pentesting Platform</p>
-            </div>
+
+            <button
+              type="button"
+              onClick={() => void checkEngineHealth()}
+              aria-label="Check local backend status"
+              title="Re-check local backend reachability"
+              className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium border ${
+                engineReachable === "online"
+                  ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-300"
+                  : engineReachable === "offline"
+                  ? "bg-red-500/10 border-red-500/30 text-red-300"
+                  : "bg-slate-800 border-slate-700 text-slate-300"
+              }`}
+            >
+              {engineReachable === "online" ? (
+                <>
+                  <Wifi className="w-3 h-3" aria-hidden="true" />
+                  <span>Engine Online</span>
+                </>
+              ) : engineReachable === "offline" ? (
+                <>
+                  <WifiOff className="w-3 h-3" aria-hidden="true" />
+                  <span>Engine Offline</span>
+                </>
+              ) : (
+                <>
+                  <RefreshCw className="w-3 h-3 animate-spin" aria-hidden="true" />
+                  <span>Checking...</span>
+                </>
+              )}
+            </button>
           </div>
 
-          <div className="text-xs text-slate-300 bg-slate-950 border border-slate-800 rounded-lg p-3">
-            Enter your local API token (retrieved via{" "}
-            <code className="text-cyan-300">./aegispt token</code>).
+          {isFileProtocol && (
+            <div role="alert" className="text-xs text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-lg p-3">
+              You opened <code>index.html</code> directly via <code>file://</code>. Start the backend with{" "}
+              <code className="text-cyan-300">./aegispt serve</code> and open{" "}
+              <code className="text-cyan-300">http://127.0.0.1:8443</code>.
+            </div>
+          )}
+
+          {engineReachable === "offline" && !isFileProtocol && (
+            <div role="alert" className="text-xs text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-lg p-3">
+              Backend API is not responding yet. Start it in your terminal with{" "}
+              <code className="text-cyan-300">cd aegispt &amp;&amp; ./aegispt serve</code>, then click{" "}
+              <strong>Engine Offline</strong> above to re-check.
+            </div>
+          )}
+
+          <div className="text-xs text-slate-300 bg-slate-950 border border-slate-800 rounded-lg p-3 space-y-1">
+            <div>
+              Run <code className="text-cyan-300">./aegispt token</code> in your terminal and paste the{" "}
+              <code className="text-cyan-300">aegis_...</code> token below.
+            </div>
+            <div className="text-[11px] text-slate-400">
+              Pasted box borders or spaces are cleaned automatically.
+            </div>
           </div>
 
           <div>
-            <label htmlFor={tokenInputId} className="block text-xs font-medium text-slate-300 mb-1">
-              Local API Token
-            </label>
-            <div className="flex items-center gap-2 bg-slate-950 border border-slate-800 rounded-lg px-3 focus-within:ring-2 focus-within:ring-cyan-500">
+            <div className="flex items-center justify-between mb-1">
+              <label htmlFor={tokenInputId} className="block text-xs font-medium text-slate-300">
+                Local API Token
+              </label>
+              <button
+                type="button"
+                onClick={() => void handlePasteToken()}
+                className="inline-flex items-center gap-1 text-[11px] text-cyan-400 hover:text-cyan-300 focus:outline-none focus:ring-2 focus:ring-cyan-500 rounded px-1.5 py-0.5"
+              >
+                <ClipboardPaste className="w-3 h-3" aria-hidden="true" />
+                <span>Paste from Clipboard</span>
+              </button>
+            </div>
+            <div className="flex items-center gap-1.5 bg-slate-950 border border-slate-700 rounded-lg px-3 focus-within:ring-2 focus-within:ring-cyan-500 focus-within:border-cyan-500">
               <KeyRound className="w-4 h-4 text-slate-500 shrink-0" aria-hidden="true" />
               <input
                 id={tokenInputId}
-                type="password"
-                required
+                name="aegispt_api_token"
+                type={showToken ? "text" : "password"}
+                autoFocus
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="off"
+                spellCheck={false}
                 value={tokenInput}
-                onChange={(e) => setTokenInput(e.target.value)}
-                placeholder="aegis_..."
-                className="w-full bg-transparent py-2.5 text-sm text-white focus:outline-none focus:ring-0 font-mono"
+                onChange={(e) => {
+                  setTokenInput(e.target.value);
+                  if (authError) setAuthError("");
+                }}
+                onPaste={(e) => {
+                  const pasted = e.clipboardData?.getData("text");
+                  if (pasted) {
+                    e.preventDefault();
+                    setTokenInput(normalizeApiToken(pasted));
+                    if (authError) setAuthError("");
+                  }
+                }}
+                placeholder="Paste aegis_... token here"
+                className="w-full bg-transparent py-2.5 text-sm text-white placeholder:text-slate-600 focus:outline-none focus:ring-0 font-mono"
               />
+              {tokenInput && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setTokenInput("");
+                    setAuthError("");
+                  }}
+                  aria-label="Clear token input"
+                  title="Clear token"
+                  className="p-1 text-slate-400 hover:text-white rounded focus:outline-none focus:ring-2 focus:ring-cyan-500"
+                >
+                  <X className="w-3.5 h-3.5" aria-hidden="true" />
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => setShowToken((prev) => !prev)}
+                aria-label={showToken ? "Hide API token" : "Show API token"}
+                title={showToken ? "Hide token" : "Show token"}
+                className="p-1 text-slate-400 hover:text-white rounded focus:outline-none focus:ring-2 focus:ring-cyan-500"
+              >
+                {showToken ? (
+                  <EyeOff className="w-4 h-4" aria-hidden="true" />
+                ) : (
+                  <Eye className="w-4 h-4" aria-hidden="true" />
+                )}
+              </button>
             </div>
           </div>
 
           {authError && (
-            <div role="alert" className="text-xs text-red-400">
+            <div role="alert" className="text-xs text-red-300 bg-red-500/10 border border-red-500/30 rounded-lg p-2.5">
               {authError}
             </div>
           )}
 
           <button
             type="submit"
-            disabled={loginBusy}
+            disabled={loginBusy || !tokenInput.trim()}
             className="w-full py-2.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-white text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-cyan-400"
           >
             {loginBusy ? "Connecting..." : "Connect to Local Engine"}
@@ -667,11 +844,12 @@ export default function App() {
           <button
             type="button"
             onClick={() => setShowSettings(true)}
-            aria-label="LLM and Kali Tool Settings"
-            className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 focus:outline-none focus:ring-2 focus:ring-cyan-500"
-            title="LLM & Kali Tool Settings"
+            aria-label="API Key and LLM Settings"
+            className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-cyan-500/30 text-cyan-300 hover:text-cyan-200 text-xs font-medium focus:outline-none focus:ring-2 focus:ring-cyan-500"
+            title="Configure AI Provider API Key & Kali Toolchain Settings"
           >
-            <Settings className="w-4 h-4" />
+            <Settings className="w-3.5 h-3.5" aria-hidden="true" />
+            <span>API Key / AI Settings</span>
           </button>
           <button
             type="button"

@@ -9,13 +9,20 @@ from pathlib import Path
 from pydantic import Field, PrivateAttr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
 
 def _default_data_dir() -> Path:
     """Resolve default data directory consistently across editable and installed packages."""
-    project_root = Path(__file__).resolve().parents[2]
-    if (project_root / "pyproject.toml").is_file():
-        return project_root / "data"
+    if (_PROJECT_ROOT / "pyproject.toml").is_file():
+        return _PROJECT_ROOT / "data"
     return Path.home() / ".local" / "share" / "aegispt"
+
+
+def _default_env_files() -> tuple[str | Path, ...]:
+    if (_PROJECT_ROOT / "pyproject.toml").is_file():
+        return (_PROJECT_ROOT / ".env", ".env")
+    return (".env",)
 
 
 def _chmod_best_effort(path: Path, mode: int) -> None:
@@ -28,7 +35,7 @@ def _chmod_best_effort(path: Path, mode: int) -> None:
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="AEGISPT_",
-        env_file=".env",
+        env_file=_default_env_files(),
         env_file_encoding="utf-8",
         extra="ignore",
     )

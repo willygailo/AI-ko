@@ -187,8 +187,11 @@ def serve(
     port: Optional[int] = typer.Option(
         None, help="HTTP/WebSocket port (defaults to AEGISPT_PORT / 8443)"
     ),
+    hide_token: bool = typer.Option(
+        False, "--hide-token", help="Do not print the local API token on startup"
+    ),
 ) -> None:
-    """Start the AegisPT FastAPI + WebSocket server."""
+    """Start the AegisPT FastAPI + WebSocket server and display the Web Dashboard token."""
     import uvicorn
 
     from app.config import get_settings
@@ -206,16 +209,39 @@ def serve(
         if callable(cache_clear):
             cache_clear()
 
+    tok = resolve_api_token() or get_settings().get_or_create_api_token()
+    display_host = "127.0.0.1" if resolved_host in {"0.0.0.0", ""} else resolved_host
+    err_console.print(f"[bold cyan][AegisPT] Web Dashboard:[/bold cyan] http://{display_host}:{resolved_port}")
+    if not hide_token and os.environ.get("AEGISPT_PRINT_TOKEN") != "0":
+        err_console.print(
+            "[cyan][AegisPT] Copy & paste this Local API Token into the Web Dashboard:[/cyan]"
+        )
+        sys.stdout.write(tok + "\n")
+        sys.stdout.flush()
+
     uvicorn.run("app.main:app", host=resolved_host, port=resolved_port, reload=False)
 
 
 @app.command()
-def token() -> None:
+def token(
+    raw: bool = typer.Option(
+        False, "--raw", "-r", help="Print only the raw API token without headers or hints"
+    ),
+) -> None:
     """Print or initialize the local API bearer token for Web Dashboard access."""
     from app.config import get_settings
 
     tok = resolve_api_token() or get_settings().get_or_create_api_token()
-    console.print(Panel(Text(tok), title="AegisPT Local API Token", border_style="cyan"))
+    if raw or not sys.stdout.isatty():
+        sys.stdout.write(tok + "\n")
+        sys.stdout.flush()
+        return
+
+    err_console.print(
+        "[cyan]AegisPT Local API Token[/cyan] [dim](copy the line below into http://127.0.0.1:8443):[/dim]"
+    )
+    sys.stdout.write(tok + "\n")
+    sys.stdout.flush()
 
 
 @app.command()
@@ -1190,8 +1216,12 @@ def diff(
 @app.command()
 @_handle_api_errors
 def repeat(
-    engagement_id: str = typer.Argument(..., help="Engagement ID (or 'latest')"),
-    url: str = typer.Argument(..., help="Target URL inside engagement scope"),
+    target_or_engagement: str = typer.Argument(
+        ..., help="Target URL (uses 'latest' engagement) or Engagement ID"
+    ),
+    url: Optional[str] = typer.Argument(
+        None, help="Target URL inside engagement scope when Engagement ID is specified first"
+    ),
     method: str = typer.Option("GET", "--method", "-X", help="HTTP method"),
     header: list[str] = typer.Option([], "--header", "-H", help="Custom header 'Key: Value' (repeatable)"),
     body: Optional[str] = typer.Option(None, "--data", "-d", help="Optional request body"),
@@ -1200,6 +1230,13 @@ def repeat(
     full_body: bool = typer.Option(False, "--full-body", help="Show full response body without truncation"),
 ) -> None:
     """Send an interactive scoped HTTP request through the AegisPT Repeater."""
+    if url is None:
+        engagement_id = "latest"
+        resolved_url = target_or_engagement
+    else:
+        engagement_id = target_or_engagement
+        resolved_url = url
+
     headers = _parse_kv(header, ":", label="--header")
     with _open_client() as client:
         eng_id = _resolve_engagement_id(client, engagement_id)
@@ -1207,7 +1244,7 @@ def repeat(
             f"/api/v1/engagements/{eng_id}/repeater",
             json_body={
                 "method": method.upper(),
-                "url": url,
+                "url": resolved_url,
                 "headers": headers,
                 "body": body,
                 "use_engagement_auth": not no_auth,

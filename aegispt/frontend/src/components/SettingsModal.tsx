@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useId, useState } from "react";
-import { Cpu, RefreshCw, Settings, Trash2, Wrench } from "lucide-react";
+import { Cpu, Eye, EyeOff, KeyRound, RefreshCw, Settings, Trash2, Wrench } from "lucide-react";
 import { type DoctorResponse, type LLMProfileItem, api } from "../api/client";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { ModalFrame } from "./ModalFrame";
@@ -23,14 +23,15 @@ export const SettingsModal: React.FC<Props> = ({
   const [doctorLoading, setDoctorLoading] = useState(true);
   const [doctorError, setDoctorError] = useState("");
 
-  const [name, setName] = useState("Remote vLLM Server");
-  const [provider, setProvider] = useState<"ollama" | "openai_compat">("openai_compat");
-  const [baseUrl, setBaseUrl] = useState("http://127.0.0.1:8000");
+  const [name, setName] = useState("Ollama Cloud");
+  const [provider, setProvider] = useState<"ollama" | "openai_compat">("ollama");
+  const [baseUrl, setBaseUrl] = useState("https://ollama.com");
   const [apiKey, setApiKey] = useState("");
-  const [fastModel, setFastModel] = useState("qwen2.5:3b");
-  const [reasoningModel, setReasoningModel] = useState("qwen2.5-coder:7b");
+  const [showApiKey, setShowApiKey] = useState(true);
+  const [fastModel, setFastModel] = useState("qwen3-next:80b");
+  const [reasoningModel, setReasoningModel] = useState("qwen3-coder:480b");
   const [redactOutbound, setRedactOutbound] = useState(true);
-  const [isDefault, setIsDefault] = useState(false);
+  const [isDefault, setIsDefault] = useState(true);
 
   const [discovered, setDiscovered] = useState<string[]>([]);
   const [probeMsg, setProbeMsg] = useState("");
@@ -89,20 +90,33 @@ export const SettingsModal: React.FC<Props> = ({
     setProbeMsg("");
     setSaving(true);
     try {
+      const trimmedName = name.trim();
+      const existingSameName = profiles.find(
+        (p) => p.name.trim().toLowerCase() === trimmedName.toLowerCase()
+      );
+      if (existingSameName) {
+        await api.deleteLLMProfile(existingSameName.id);
+      }
       await api.createLLMProfile({
-        name: name.trim(),
+        name: trimmedName,
         provider,
         base_url: baseUrl.trim(),
-        api_key: apiKey,
+        api_key: apiKey.trim(),
         fast_model: fastModel.trim(),
         reasoning_model: reasoningModel.trim(),
         redact_outbound: redactOutbound,
         is_default: isDefault,
       });
       await onRefreshProfiles();
-      setProbeMsg("Saved LLM profile.");
+      await loadDoctor();
+      setProbeMsg(existingSameName ? "Updated LLM profile & API key." : "Saved LLM profile.");
       setApiKey("");
-      onToast?.("success", `Saved LLM profile "${name.trim()}".`);
+      onToast?.(
+        "success",
+        existingSameName
+          ? `Updated LLM profile "${trimmedName}".`
+          : `Saved LLM profile "${trimmedName}".`
+      );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       setFormError(msg);
@@ -184,6 +198,30 @@ export const SettingsModal: React.FC<Props> = ({
                       <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-cyan-300 uppercase">
                         {p.provider}
                       </span>
+                      <span
+                        className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
+                          p.has_api_key
+                            ? "bg-emerald-500/15 text-emerald-300"
+                            : "bg-slate-800 text-slate-400"
+                        }`}
+                      >
+                        {p.has_api_key ? "Key Set" : "No Key"}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setName(p.name);
+                          setProvider(p.provider);
+                          setBaseUrl(p.base_url);
+                          setFastModel(p.fast_model);
+                          setReasoningModel(p.reasoning_model);
+                          setRedactOutbound(p.redact_outbound);
+                          setIsDefault(p.is_default);
+                        }}
+                        className="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 border border-slate-700 text-[10px] text-cyan-300 font-medium focus:outline-none focus:ring-2 focus:ring-cyan-500"
+                      >
+                        Edit / Key
+                      </button>
                       {!p.is_default && (
                         <button
                           type="button"
@@ -307,16 +345,33 @@ export const SettingsModal: React.FC<Props> = ({
 
               <div>
                 <label htmlFor={`${idPrefix}-apikey`} className="block text-[11px] text-slate-400 mb-1">
-                  API Key (optional)
+                  API Key (paste your Ollama Cloud / OpenAI API key here)
                 </label>
-                <input
-                  id={`${idPrefix}-apikey`}
-                  type="password"
-                  value={apiKey}
-                  onChange={(e) => setApiKey(e.target.value)}
-                  placeholder="Optional API Key"
-                  className="w-full bg-slate-950 border border-slate-800 rounded px-2.5 py-1.5 text-white focus:outline-none focus:ring-2 focus:ring-cyan-500"
-                />
+                <div className="flex items-center gap-1.5 bg-slate-950 border border-slate-700 rounded px-2.5 focus-within:ring-2 focus-within:ring-cyan-500">
+                  <KeyRound className="w-3.5 h-3.5 text-cyan-400 shrink-0" aria-hidden="true" />
+                  <input
+                    id={`${idPrefix}-apikey`}
+                    type={showApiKey ? "text" : "password"}
+                    autoComplete="off"
+                    spellCheck={false}
+                    value={apiKey}
+                    onChange={(e) => setApiKey(e.target.value)}
+                    placeholder="Paste API Key here"
+                    className="w-full bg-transparent py-1.5 font-mono text-white focus:outline-none focus:ring-0"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowApiKey((prev) => !prev)}
+                    aria-label={showApiKey ? "Hide API Key" : "Show API Key"}
+                    className="p-1 text-slate-400 hover:text-white rounded focus:outline-none focus:ring-2 focus:ring-cyan-500"
+                  >
+                    {showApiKey ? (
+                      <EyeOff className="w-3.5 h-3.5" aria-hidden="true" />
+                    ) : (
+                      <Eye className="w-3.5 h-3.5" aria-hidden="true" />
+                    )}
+                  </button>
+                </div>
               </div>
 
               {discovered.length > 0 && (

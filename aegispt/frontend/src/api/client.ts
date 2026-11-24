@@ -377,6 +377,24 @@ export function parseApiErrorMessage(status: number, bodyText: string): string {
 
 const TOKEN_STORAGE_KEY = "aegispt_api_token";
 
+export function normalizeApiToken(raw: string): string {
+  if (!raw) return "";
+  // Strip terminal box-drawing chars, quotes, and zero-width chars
+  let cleaned = raw
+    .replace(/[│╭╮╰╯─━┃┏┓┗┛┌┐└┘├┤┬┴┼"|'`\u200B-\u200D\uFEFF]/g, " ")
+    .trim();
+  cleaned = cleaned.replace(/^authorization\s*:\s*/i, "").trim();
+  cleaned = cleaned.replace(/^bearer\s+/i, "").trim();
+
+  // If the user pasted a terminal panel or wrapped lines containing `aegis_...`, stitch & extract it
+  const compact = cleaned.replace(/\s+/g, "");
+  const match = compact.match(/aegis_[A-Za-z0-9_-]{6,}/);
+  if (match) {
+    return match[0];
+  }
+  return compact;
+}
+
 type UnauthorizedHandler = (reason?: string) => void;
 let unauthorizedHandler: UnauthorizedHandler | null = null;
 
@@ -386,12 +404,12 @@ export function setUnauthorizedHandler(handler: UnauthorizedHandler | null): voi
 
 export function getStoredToken(): string {
   if (typeof localStorage === "undefined") return "";
-  return localStorage.getItem(TOKEN_STORAGE_KEY) || "";
+  return normalizeApiToken(localStorage.getItem(TOKEN_STORAGE_KEY) || "");
 }
 
 export function setStoredToken(tok: string): void {
   if (typeof localStorage === "undefined") return;
-  localStorage.setItem(TOKEN_STORAGE_KEY, tok.trim());
+  localStorage.setItem(TOKEN_STORAGE_KEY, normalizeApiToken(tok));
 }
 
 export function clearStoredToken(): void {
@@ -426,7 +444,20 @@ export async function apiFetch<T>(path: string, init: ApiFetchOptions = {}): Pro
   return (await resp.json()) as T;
 }
 
+export interface HealthResponse {
+  status: string;
+  service: string;
+  version: string;
+}
+
 export const api = {
+  health: async (): Promise<HealthResponse> => {
+    const resp = await fetch("/api/v1/system/health");
+    if (!resp.ok) {
+      throw new ApiError(resp.status, `Health check failed with HTTP ${resp.status}`);
+    }
+    return (await resp.json()) as HealthResponse;
+  },
   doctor: () => apiFetch<DoctorResponse>("/api/v1/system/doctor"),
   listTools: () => apiFetch<{ tools: ToolCatalogItem[] }>("/api/v1/system/tools"),
   getWsTicket: () => apiFetch<WsTicketResponse>("/api/v1/system/ws-ticket", { method: "POST" }),
