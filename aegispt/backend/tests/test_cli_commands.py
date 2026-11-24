@@ -935,11 +935,13 @@ def test_pyproject_packaging_metadata_and_package_data() -> None:
     assert "cryptography" in dep_names
     assert "defusedxml" in dep_names
     assert "jinja2" not in dep_names
+    assert any(d.lower().startswith("sqlalchemy[asyncio]") for d in deps)
 
     opt = data["project"]["optional-dependencies"]
     assert any(d.lower().startswith("playwright") for d in opt["spa"])
     assert any(d.lower().startswith("ruff") for d in opt["dev"])
     assert any(d.lower().startswith("pytest") for d in opt["dev"])
+    assert any(d.lower().startswith("setuptools") for d in opt["dev"])
 
     find_cfg = data["tool"]["setuptools"]["packages"]["find"]
     assert find_cfg["where"] == ["backend", "cli"]
