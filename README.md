@@ -81,13 +81,38 @@ Built for Kali Linux with allowlist-only scope enforcement, 3-tier human-in-the-
 
 ## How to Set Up
 
+> [!IMPORTANT]
+> **60-Second Copy-Paste Quick Start (All-in-One)**
+> Run this single block to clone, install, build the Web UI, and start AegisPT:
+> ```bash
+> git clone https://github.com/willygailo/AI-ko.git
+> cd AI-ko/aegispt
+>
+> # 1. Create Python virtualenv & install backend + CLI
+> python3 -m venv .venv
+> .venv/bin/pip install --upgrade pip && .venv/bin/pip install -e ".[dev]"
+>
+> # 2. Build the React Web Dashboard
+> cd frontend && pnpm install --frozen-lockfile && pnpm build && cd ..
+>
+> # 3. Start AegisPT (prints the Web URL & your copy-pasteable token immediately!)
+> ./aegispt serve
+> ```
+> You will immediately see in your terminal:
+> ```text
+> [AegisPT] Web Dashboard: http://127.0.0.1:8443
+> [AegisPT] Copy & paste this Local API Token into the Web Dashboard:
+> aegis_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+> ```
+> Copy the `aegis_...` line → open **`http://127.0.0.1:8443`** → paste it → click **`API Key / AI Settings`** in the top-right to paste your AI API key!
+
 ### Prerequisites
 
 | Requirement | Needed For | Notes |
 | :--- | :--- | :--- |
 | **Linux / Kali Linux** | Core platform & CLI | Built-in `http_probe`, `js_miner`, and core scanners work anywhere; Kali provides the external CLI binaries (`nmap`, `ffuf`, `nuclei`, `sqlmap`, `dalfox`, etc.) |
 | **Python 3.11+** | Backend & CLI | Required (`python3 -m venv` recommended on clean systems) |
-| **Node.js 24+ & `pnpm`** | Building the Web UI | Only needed when building or developing `aegispt/frontend` |
+| **Node.js 24+ & `pnpm` 11+** | Building the Web UI | Only needed when building or developing `aegispt/frontend` |
 | **Docker + Compose** *(Optional)* | Practice lab | For running the isolated localhost-only OWASP Juice Shop lab (`127.0.0.1:3000`) |
 | **LLM Provider** *(Optional)* | AI planning & triage | **Ollama Cloud**, **Local Ollama**, **OpenAI-compatible / vLLM**, or **Zero-LLM Offline mode** |
 
@@ -133,7 +158,7 @@ This builds `aegispt/frontend/dist/`, which the FastAPI server mounts automatica
 ### Step 3: Configure Your AI Provider (Web UI or Optional `.env` Wizard)
 
 > [!TIP]
-> **Easiest Way (Web Dashboard)**: You can skip editing `.env`—just run `./aegispt serve`, sign in at `http://127.0.0.1:8443`, and click **`API Key / AI Settings`** in the top bar to paste your **Ollama Cloud** (or OpenAI-compatible) API key.
+> **Easiest Way (Inside the Web Dashboard)**: You don't need to edit `.env` manually—just run `./aegispt serve`, sign in at `http://127.0.0.1:8443`, and click **`API Key / AI Settings`** in the top bar to paste your **Ollama Cloud** (or OpenAI-compatible) API key.
 
 If you prefer configuring via the terminal before starting the server:
 
@@ -142,28 +167,26 @@ cp .env.example .env
 ./aegispt setup
 ```
 
-Choose whichever mode fits your machine:
+- At the `Choose mode` prompt, you can press **`Enter`** (or type **`1`** for `cloud`, **`2`** for `local`, **`3`** for `offline`)—**or simply paste your Ollama Cloud API key directly** and AegisPT will auto-detect `cloud` mode and save your `.env` (`chmod 600`) in one step!
+- You can also run non-interactively:
+  - **Ollama Cloud (0 MB local RAM)**:
+    ```bash
+    ./aegispt setup --provider cloud
+    ```
+  - **Local Ollama (100% offline on your machine)**:
+    ```bash
+    # Default --light profile: qwen2.5:1.5b + qwen2.5:3b (~2.5 GB, ideal for 7.5–8 GB RAM)
+    ./scripts/setup_ollama.sh
 
-- **Option 1 — Ollama Cloud (0 MB local RAM)**:
-  ```bash
-  ./aegispt setup --provider cloud
-  ```
-  Configures `https://ollama.com` and stores your API key in `.env` (`0600`). You can also pass `--api-key-stdin` to avoid putting secrets in shell history.
-- **Option 2 — Local Ollama (100% offline on your machine)**:
-  ```bash
-  # Default --light profile: qwen2.5:1.5b + qwen2.5:3b (~2.5 GB, ideal for 7.5–8 GB RAM)
-  ./scripts/setup_ollama.sh
+    # Or --coder profile for 12+ GB RAM: qwen2.5:3b + qwen2.5-coder:7b (~6.5 GB)
+    ./scripts/setup_ollama.sh --coder
 
-  # Or --coder profile for 12+ GB RAM: qwen2.5:3b + qwen2.5-coder:7b (~6.5 GB)
-  ./scripts/setup_ollama.sh --coder
-
-  ./aegispt setup --provider local
-  ```
-- **Option 3 — Zero-LLM Offline Mode (no AI backend required)**:
-  ```bash
-  ./aegispt setup --provider offline
-  ```
-  Sets `AEGISPT_LLM_MODE=offline` to run deterministic OWASP WSTG + Skill Pack planning with zero outbound LLM requests.
+    ./aegispt setup --provider local
+    ```
+  - **Zero-LLM Offline Mode (no AI backend required)**:
+    ```bash
+    ./aegispt setup --provider offline
+    ```
 
 ### Step 4: Verify Your Environment
 
@@ -187,28 +210,73 @@ cd aegispt
 ```
 
 - Starts the Web Dashboard & REST/WebSocket API on **`http://127.0.0.1:8443`** and **immediately prints your copy-pasteable `aegis_...` Local API Token** right in the terminal (no second terminal needed!).
-- Copy the printed `aegis_...` token line, open **`http://127.0.0.1:8443`**, paste the token, and click **API Key / AI Settings** in the top bar to paste your AI API key.
+- Copy the printed `aegis_...` token line and open **`http://127.0.0.1:8443`** in your browser.
 - *(Tip: You can also run `./aegispt token` or `./aegispt token --raw` anytime if you ever need to retrieve the token separately, or pass `./aegispt serve --hide-token` to suppress printing it on startup.)*
 
 ---
 
-### 2. Option A — Use the Web Dashboard (`http://127.0.0.1:8443`)
+### 2. Option A — Visual Step-by-Step Web Dashboard Guide (`http://127.0.0.1:8443`)
 
-1. **Sign In**: Copy the `aegis_...` token printed by `./aegispt serve`, open `http://127.0.0.1:8443`, and click **Paste from Clipboard** (or `Ctrl+V`) → **Connect to Local Engine**.
-2. **Paste Your AI API Key**: Click **API Key / AI Settings** in the top header, paste your **Ollama Cloud** (or OpenAI-compatible) API key into the **API Key** box, and click **Save LLM Profile**.
-3. **Create a Scoped Engagement**: Click **`+ New`** to open the **Scope Wizard**:
-   - Enter authorized **Target URLs** / **Allowed Domains** (or click **Load Juice Shop Lab Preset** for local lab practice).
-   - Set **Allowed CIDRs**, **Excluded Hosts/Paths**, **Max Steps**, and **Autonomy Mode** (`tiered`, `copilot`, or `lab_autopilot`).
-   - Optionally add **User A / User B** headers or cookies in the encrypted **Multi-Role Auth Vault** to enable automated BOLA/IDOR testing.
-4. **Run, Steer & Approve**:
-   - Click **Start** to launch the Cognitive Orchestrator.
-   - Watch real-time progress in the **Live Agent Stream** and **Attack Graph**.
-   - Send mid-assessment guidance anytime via the **Live Steering** bar (e.g., *"Focus on GraphQL and JWT checks"*).
-   - When a **Tier 3** intrusive verification is proposed in `tiered` mode, review the exact command preview in the **Approval Modal** and choose **Approve**, **Modify Args**, or **Reject**.
-5. **Triage, Replay & Export Reports**:
-   - Inspect **Endpoints**, **Hypotheses**, **Skills**, **Chains**, **Runs** (with raw log viewer), **OOB Events**, and **Scan Diff** snapshots.
-   - Open **Findings** to mark items **Confirmed** / **False Positive**, click **Re-Verify**, or click **Send to Repeater** to craft and replay custom HTTP requests (with copyable `curl` commands).
-   - Export reports in one click: **HTML**, **Markdown**, **SARIF 2.1.0**, **JSON**, or a shell-safe **PoC Replay Script (`.sh`)**.
+#### Step A1: Sign In & Add Your AI API Key
+1. Open **`http://127.0.0.1:8443`** in your browser and confirm the green **`Engine Online`** badge is visible on the login card.
+2. Click **`Paste from Clipboard`** (or press `Ctrl+V` inside the token input box) to paste the `aegis_...` token printed by `./aegispt serve`, then click **`Connect to Local Engine`**.
+3. Once inside the dashboard, click **`API Key / AI Settings`** in the top-right header bar, paste your **Ollama Cloud** (or OpenAI-compatible) API key into the **API Key** field, and click **`Save LLM Profile`**.
+
+---
+
+#### Step A2: Create a Scoped Engagement (`+ New`)
+1. Click the cyan **`+ New`** button in the top-right header to open the **New Scoped Engagement** wizard.
+2. Enter an **Engagement Name** and your authorized **Allowlisted URLs** or **Allowlisted Domains** (or click **`Load Juice Shop Lab Preset`** in the top-right of the modal for local Docker practice).
+3. Configure optional **Allowlisted CIDRs**, **Excluded Hosts**, **Excluded Paths** (e.g., `/logout`, `/billing`), **Autonomy Mode** (`Tiered Autonomy (Recommended)`), and optional **Auth Headers & Session Cookies**, then click **`Create Engagement`**.
+
+<div align="center">
+  <img src="./docs/assets/dashboard-scope-wizard.png" alt="Step A2 — Create a Scoped Engagement in the Scope Wizard" width="85%" />
+</div>
+
+---
+
+#### Step A3: Review Your Scoped Workspace & Click `▶ Start Auto`
+1. After creating the engagement, the workspace opens in **`IDLE • TIERED`** state with your scope root node visible in the **Attack-Surface Graph**.
+2. Click the green **`▶ Start Auto`** button in the top header to launch the autonomous assessment (or use **`Scoped Manual Tool Execution`** in the bottom-right panel to run a single tool like `http_probe` on demand).
+
+<div align="center">
+  <img src="./docs/assets/dashboard-workspace-idle.png" alt="Step A3 — Scoped Workspace Ready to Start" width="100%" />
+</div>
+
+---
+
+#### Step A4: Monitor the Live Attack Graph, Agent Stream & Steer the AI
+1. **Left Pane (`Attack Graph` Tab)**: Watch discovered domains/hosts, HTTP endpoints (`GET /admin`, `GET /api/`, `GET /login`, etc.), and severity-coded findings connect in real time. Click any node to filter or pivot its URL directly into the manual runner or HTTP Repeater.
+2. **Right Pane (`Live Agent & Tool Stream`)**: Follow live stdout/telemetry from every tool (`ffuf`, `trufflehog`, `nuclei`, `sslscan`, `http_probe`) and planner decision.
+3. **Mid-Run Steering & Approvals**: Type hints into the **`Steer AI Brain`** bar at the bottom-right anytime, and approve/edit/reject any **Tier 3** intrusive checks when the **Approval Modal** pops up.
+
+<div align="center">
+  <img src="./docs/assets/dashboard-attack-graph.jpg" alt="Step A4 — Live Attack-Surface Graph and Agent Telemetry Stream" width="100%" />
+</div>
+
+---
+
+#### Step A5: Track OWASP WSTG & API Security Skill Coverage (`Skills` Tab)
+1. Click the **`Skills`** tab to inspect the live methodology checklist (e.g., **API BFLA**, **Business Logic State Transitions**, **JWT Signature & Claims Audit**, **URL Handling & SPA DOM Audit**).
+2. Each checklist item transitions from `PENDING` to `COVERED` automatically with an execution evidence note as matching tools finish.
+
+<div align="center">
+  <img src="./docs/assets/dashboard-skills-checklist.jpg" alt="Step A5 — Offensive Skill Methodology Checklist Coverage" width="100%" />
+</div>
+
+---
+
+#### Step A6: Triage Findings, Re-Verify, Replay & Export Reports (`Findings` Tab)
+1. Click the **`Findings`** tab to filter discovered vulnerabilities by severity (`ALL`, `CRITICAL`, `HIGH`, `MEDIUM`, `LOW`, `INFO`) and inspect CVSS v3.1, CWE, OWASP WSTG category, JSON evidence, and remediation guidance.
+2. Use the action buttons on any finding:
+   - **`Re-Verify`**: Re-runs a targeted check to confirm whether a vulnerability is still present or remediated.
+   - **`Repeat`**: Sends the finding's target URL straight to the interactive **HTTP Repeater** tab.
+   - **`Confirm` / `False Positive`**: Updates the finding's triage status immediately.
+3. Click **`HTML`**, **`MARKDOWN`**, **`SARIF`**, **`JSON`**, or **`PoC.sh`** in the top bar of the Findings studio to download developer-ready reports and shell-safe reproduction scripts.
+
+<div align="center">
+  <img src="./docs/assets/dashboard-findings-studio.jpg" alt="Step A6 — Findings Triage, Re-Verify, and Report Studio" width="100%" />
+</div>
 
 ---
 
@@ -270,6 +338,28 @@ When finished practicing, tear down the local lab container:
 ```bash
 docker compose -f lab/docker-compose.lab.yml down
 ```
+
+---
+
+### 4. Quick Troubleshooting & FAQ
+
+<details>
+<summary><strong>Where do I get the Local API Token for the Web Dashboard?</strong></summary>
+
+When you run `./aegispt serve`, the `aegis_...` token is printed automatically on its own line in your terminal. Copy that line and click **`Paste from Clipboard`** (or press `Ctrl+V`) at `http://127.0.0.1:8443`. You can also print it anytime with `./aegispt token` (or `./aegispt token --raw`).
+</details>
+
+<details>
+<summary><strong>In <code>./aegispt setup</code>, it says "Please select one of the available options" when I paste my API key—what do I do?</strong></summary>
+
+With the latest CLI update, `./aegispt setup` accepts **`1`** (`cloud`), **`2`** (`local`), **`3`** (`offline`), pressing **`Enter`**, **or pasting your Ollama Cloud API key directly** at the first prompt. You can also skip `./aegispt setup` completely and paste your API key inside the Web Dashboard under **`API Key / AI Settings`**.
+</details>
+
+<details>
+<summary><strong>What happens if the AI endpoint is offline, rate-limited, or returns HTTP 410/401 during a scan?</strong></summary>
+
+AegisPT never crashes when an LLM endpoint is unreachable—the Cognitive Orchestrator automatically switches to its built-in **Skill-Guided Deterministic Fallback Planner** (as shown in the Live Agent Stream) so your assessment still runs every applicable OWASP WSTG & API Security playbook stage to completion.
+</details>
 
 ---
 
