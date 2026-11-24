@@ -109,12 +109,37 @@ async def list_engagements(db: AsyncSession = Depends(get_db)) -> dict[str, obje
 
 @router.post("", status_code=201)
 async def create_engagement(body: EngagementCreate, db: AsyncSession = Depends(get_db)) -> dict[str, object]:
+    from app.core.targets import parse_target_inputs
+
+    parsed = parse_target_inputs(
+        [
+            *body.scope.targets,
+            *body.scope.allowed_urls,
+            *body.scope.allowed_domains,
+            *body.scope.allowed_cidrs,
+        ]
+    )
+    merged_urls = list(dict.fromkeys([*body.scope.allowed_urls, *parsed.allowed_urls]))
+    # Keep explicit allowed_urls plus normalized domains/CIDRs while ensuring bare IPs aren't left ambiguous
+    merged_domains = list(
+        dict.fromkeys(
+            [
+                *[d for d in body.scope.allowed_domains if "/" not in d],
+                *parsed.allowed_domains,
+            ]
+        )
+    )
+    merged_cidrs = list(dict.fromkeys([*body.scope.allowed_cidrs, *parsed.allowed_cidrs]))
+    allow_private = bool(
+        body.scope.allow_private_ips or body.scope.ctf_mode or parsed.detected_private_or_lab
+    )
+
     # Validate scope policy immediately on creation
     try:
         ScopePolicy(
-            allowed_domains=body.scope.allowed_domains,
-            allowed_urls=body.scope.allowed_urls,
-            allowed_cidrs=body.scope.allowed_cidrs,
+            allowed_domains=merged_domains,
+            allowed_urls=merged_urls,
+            allowed_cidrs=merged_cidrs,
             excluded_hosts=body.scope.excluded_hosts,
             excluded_paths=body.scope.excluded_paths,
             max_rps=body.scope.max_rps,
@@ -123,12 +148,12 @@ async def create_engagement(body: EngagementCreate, db: AsyncSession = Depends(g
             auth_cookies=body.scope.auth_cookies,
             secondary_headers=body.scope.secondary_headers,
             secondary_cookies=body.scope.secondary_cookies,
-            allow_private_ips=body.scope.allow_private_ips,
+            allow_private_ips=allow_private,
         )
     except ScopeViolationError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
-    if not (body.scope.allowed_domains or body.scope.allowed_urls or body.scope.allowed_cidrs):
+    if not (merged_domains or merged_urls or merged_cidrs):
         raise HTTPException(
             status_code=400,
             detail="Scope must include at least one allowlisted domain, URL, or CIDR.",
@@ -156,9 +181,9 @@ async def create_engagement(body: EngagementCreate, db: AsyncSession = Depends(g
 
     scope = ScopePolicyModel(
         engagement_id=eng.id,
-        allowed_domains=body.scope.allowed_domains,
-        allowed_urls=body.scope.allowed_urls,
-        allowed_cidrs=body.scope.allowed_cidrs,
+        allowed_domains=merged_domains,
+        allowed_urls=merged_urls,
+        allowed_cidrs=merged_cidrs,
         excluded_hosts=body.scope.excluded_hosts,
         excluded_paths=body.scope.excluded_paths,
         max_rps=body.scope.max_rps,
@@ -167,7 +192,7 @@ async def create_engagement(body: EngagementCreate, db: AsyncSession = Depends(g
         auth_cookies=encrypt_dict(body.scope.auth_cookies),
         secondary_headers=encrypt_dict(body.scope.secondary_headers),
         secondary_cookies=encrypt_dict(body.scope.secondary_cookies),
-        allow_private_ips=body.scope.allow_private_ips,
+        allow_private_ips=allow_private,
     )
     db.add(scope)
     await db.commit()
@@ -258,6 +283,16 @@ async def get_engagement(engagement_id: str, db: AsyncSession = Depends(get_db))
         )
     ).scalars().all()
 
+    from app.core.intel_summary import build_intel_summary
+
+    intel_summary = build_intel_summary(
+        engagement=eng,
+        assets=assets,
+        endpoints=endpoints,
+        findings=findings,
+        runs=runs,
+    )
+
     return {
         **_serialize_engagement(eng, scope),
         "assets": [
@@ -270,10 +305,14 @@ async def get_engagement(engagement_id: str, db: AsyncSession = Depends(get_db))
                 "title": a.title,
                 "waf": a.waf,
                 "technologies": a.technologies,
+                "headers": a.headers or {},
                 "discovered_by": a.discovered_by,
             }
             for a in assets
         ],
+        "intel": intel_summary["items"],
+        "intel_counts": intel_summary["counts"],
+        "open_ports": intel_summary["open_ports"],
         "endpoints": [
             {
                 "id": ep.id,
@@ -794,3 +833,53 @@ async def trigger_chain_synthesis(
             for c in created
         ],
     }
+
+
+@router.get("/{engagement_id}/assets")
+async def list_engagement_assets(engagement_id: str, db: AsyncSession = Depends(get_db)) -> dict[str, object]:
+    eng = await db.get(Engagement, engagement_id)
+    if not eng:
+        raise HTTPException(status_code=404, detail="Engagement not found.")
+    assets = (await db.execute(select(Asset).where(Asset.engagement_id == engagement_id))).scalars().all()
+    from app.core.intel_summary import _port_records_from_asset
+
+    return {
+        "engagement_id": engagement_id,
+        "assets": [
+            {
+                "id": a.id,
+                "asset_type": a.asset_type,
+                "value": a.value,
+                "ip_address": a.ip_address,
+                "status_code": a.status_code,
+                "title": a.title,
+                "waf": a.waf,
+                "technologies": a.technologies or [],
+                "ports": _port_records_from_asset(a),
+                "headers": a.headers or {},
+                "discovered_by": a.discovered_by,
+            }
+            for a in assets
+        ],
+    }
+
+
+@router.get("/{engagement_id}/intel")
+async def get_engagement_intel(engagement_id: str, db: AsyncSession = Depends(get_db)) -> dict[str, object]:
+    eng = await db.get(Engagement, engagement_id)
+    if not eng:
+        raise HTTPException(status_code=404, detail="Engagement not found.")
+    assets = (await db.execute(select(Asset).where(Asset.engagement_id == engagement_id))).scalars().all()
+    endpoints = (await db.execute(select(Endpoint).where(Endpoint.engagement_id == engagement_id))).scalars().all()
+    findings = (await db.execute(select(Finding).where(Finding.engagement_id == engagement_id))).scalars().all()
+    runs = (await db.execute(select(ToolRun).where(ToolRun.engagement_id == engagement_id))).scalars().all()
+    from app.core.intel_summary import build_intel_summary
+
+    summary = build_intel_summary(
+        engagement=eng,
+        assets=assets,
+        endpoints=endpoints,
+        findings=findings,
+        runs=runs,
+    )
+    return {"engagement_id": engagement_id, **summary}

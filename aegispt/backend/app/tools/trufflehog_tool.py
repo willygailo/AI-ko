@@ -125,6 +125,7 @@ class TrufflehogAdapter(BaseToolAdapter):
         self, *, target: str, args: BaseModel, stdout: str, stderr: str, work_dir: Path
     ) -> ToolResult:
         findings: list[DiscoveredFinding] = []
+        intel_items: list[dict[str, object]] = []
         seen: set[tuple[str, str]] = set()
         for line in stdout.splitlines():
             line = line.strip()
@@ -145,6 +146,18 @@ class TrufflehogAdapter(BaseToolAdapter):
             if key in seen:
                 continue
             seen.add(key)
+            masked = _mask_secret(raw_val)
+            intel_items.append(
+                {
+                    "category": "key",
+                    "label": f"TruffleHog ({detector})",
+                    "value": raw_val,
+                    "masked_value": masked,
+                    "sensitive": True,
+                    "location": file_ref or target,
+                    "tool_source": self.name,
+                }
+            )
             findings.append(
                 DiscoveredFinding(
                     title=f"TruffleHog Detected {detector} Credential in '{file_ref}'",
@@ -158,7 +171,7 @@ class TrufflehogAdapter(BaseToolAdapter):
                         "detector": detector,
                         "verified": verified,
                         "artifact": file_ref,
-                        "masked_sample": _mask_secret(raw_val),
+                        "masked_sample": masked,
                     },
                     remediation="Remove hardcoded credentials from client bundles/public files and rotate exposed keys.",
                     tool_source=self.name,
@@ -169,5 +182,5 @@ class TrufflehogAdapter(BaseToolAdapter):
             exit_code=0,
             duration_ms=0,
             findings=findings,
-            summary={"findings_count": len(findings)},
+            summary={"findings_count": len(findings), "extracted_intel": intel_items},
         )

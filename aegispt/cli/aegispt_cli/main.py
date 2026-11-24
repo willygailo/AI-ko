@@ -359,6 +359,12 @@ def list_engagements() -> None:
 @_handle_api_errors
 def create_engagement(
     name: str = typer.Option(..., "--name", "-n", help="Engagement name"),
+    target: list[str] = typer.Option(
+        [],
+        "--target",
+        "-t",
+        help="Quick target: URL, Domain, IP, IP:port, or CIDR (repeatable; auto-classifies)",
+    ),
     url: list[str] = typer.Option([], "--url", "-u", help="Allowlisted target URL (repeatable)"),
     domain: list[str] = typer.Option([], "--domain", "-d", help="Allowlisted domain (repeatable)"),
     allowed_cidr: list[str] = typer.Option([], "--allowed-cidr", help="Allowlisted CIDR block (repeatable)"),
@@ -375,28 +381,32 @@ def create_engagement(
     max_rps: int = typer.Option(15, "--max-rps", min=1, max=100, help="Max requests per second (1-100)"),
     max_concurrency: int = typer.Option(5, "--max-concurrency", min=1, max=30, help="Max concurrent probes (1-30)"),
     allow_private_ips: bool = typer.Option(False, "--allow-private-ips", help="Allow localhost/RFC1918 lab targets"),
+    ctf: bool = typer.Option(False, "--ctf", "--htb", help="Enable CTF / HTB lab preset (private IPs + lab_autopilot)"),
+    start: bool = typer.Option(False, "--start", "-s", help="Immediately start assessment after creation"),
     objective: str = typer.Option(
         "Comprehensive Web Application & API Security Assessment", "--objective"
     ),
 ) -> None:
     """Create a new scoped engagement."""
-    if mode not in VALID_AUTONOMY_MODES:
+    effective_mode = "lab_autopilot" if (ctf and mode == "tiered") else mode
+    if effective_mode not in VALID_AUTONOMY_MODES:
         raise typer.BadParameter(
-            f"Invalid --mode {mode!r}. Expected one of: {', '.join(sorted(VALID_AUTONOMY_MODES))}."
+            f"Invalid --mode {effective_mode!r}. Expected one of: {', '.join(sorted(VALID_AUTONOMY_MODES))}."
         )
-    if not (url or domain or allowed_cidr):
+    if not (target or url or domain or allowed_cidr):
         raise typer.BadParameter(
-            "Scope must include at least one --url, --domain, or --allowed-cidr."
+            "Scope must include at least one --target, --url, --domain, or --allowed-cidr."
         )
 
     payload: dict[str, Any] = {
         "name": name,
         "objective": objective,
-        "autonomy_mode": mode,
-        "tier2_auto": tier2_auto,
+        "autonomy_mode": effective_mode,
+        "tier2_auto": True if ctf else tier2_auto,
         "max_steps": max_steps,
         "llm_profile_id": llm_profile_id,
         "scope": {
+            "targets": target,
             "allowed_urls": url,
             "allowed_domains": domain,
             "allowed_cidrs": allowed_cidr,
@@ -408,11 +418,15 @@ def create_engagement(
             "secondary_cookies": _parse_kv(secondary_cookie, "=", label="--secondary-cookie"),
             "max_rps": max_rps,
             "max_concurrency": max_concurrency,
-            "allow_private_ips": allow_private_ips,
+            "allow_private_ips": allow_private_ips or ctf,
+            "ctf_mode": ctf,
         },
     }
     with _open_client() as client:
         created = client.post("/api/v1/engagements", json_body=payload).json()
+        if start and created.get("id"):
+            client.post(f"/api/v1/engagements/{created['id']}/start")
+            created["status"] = "running"
     eng_id = escape(str(created["id"]))
     console.print(
         Panel(
@@ -1657,6 +1671,104 @@ def tools(
         for m_name, m_tier, m_desc in shown_modes:
             modes_tbl.add_row(escape(m_name), m_tier, escape(m_desc))
         console.print(modes_tbl)
+
+
+@app.command("assets")
+@_handle_api_errors
+def list_assets(
+    engagement_id: str = typer.Argument("latest", help="Engagement ID (or 'latest')"),
+    json_output: bool = typer.Option(False, "--json", help="Print JSON output"),
+) -> None:
+    """Display discovered hosts, IP addresses, open ports, status codes, and versions."""
+    with _open_client() as client:
+        eng_id = _resolve_engagement_id(client, engagement_id)
+        data = client.get(f"/api/v1/engagements/{eng_id}/assets").json()
+    assets = data.get("assets") or []
+    if json_output:
+        sys.stdout.write(json.dumps(data, indent=2) + "\n")
+        sys.stdout.flush()
+        return
+
+    table = Table(title=f"Discovered Assets & Open Ports — {eng_id} ({len(assets)})")
+    table.add_column("Asset ID", style="cyan", no_wrap=True)
+    table.add_column("Type", no_wrap=True)
+    table.add_column("Host / Value", style="bold", overflow="fold")
+    table.add_column("IP Address", style="green", no_wrap=True)
+    table.add_column("Status", justify="right", no_wrap=True)
+    table.add_column("Open Ports & Services", overflow="fold")
+    table.add_column("Title / Tech", overflow="fold")
+    for a in assets:
+        ports_list = a.get("ports") or []
+        ports_str = ", ".join(
+            f"{p.get('port')}/{p.get('proto')}"
+            + (f" {p.get('service')}" if p.get("service") else "")
+            + (f" ({p.get('banner')})" if p.get("banner") else "")
+            for p in ports_list
+        )
+        other_tech = [str(t) for t in (a.get("technologies") or []) if not str(t).startswith("port:")]
+        title_tech = " | ".join(x for x in [str(a.get("title") or ""), ", ".join(other_tech[:5])] if x) or "-"
+        table.add_row(
+            escape(str(a["id"])),
+            escape(str(a.get("asset_type") or "-")),
+            escape(str(a.get("value") or "-")),
+            escape(str(a.get("ip_address") or "-")),
+            escape(str(a.get("status_code") or "-")),
+            escape(ports_str or "-"),
+            escape(title_tech[:80]),
+        )
+    console.print(table)
+
+
+@app.command("intel")
+@_handle_api_errors
+def list_intel(
+    engagement_id: str = typer.Argument("latest", help="Engagement ID (or 'latest')"),
+    category: Optional[str] = typer.Option(
+        None,
+        "--category",
+        "-c",
+        help="Filter by category: flag | key | credential | identifier | name | number",
+    ),
+    reveal: bool = typer.Option(True, "--reveal/--mask", help="Show full values or masked previews"),
+    json_output: bool = typer.Option(False, "--json", help="Print JSON output"),
+) -> None:
+    """Display extracted CTF flags, keys, credentials, IDs, names, IPs, and ports."""
+    with _open_client() as client:
+        eng_id = _resolve_engagement_id(client, engagement_id)
+        data = client.get(f"/api/v1/engagements/{eng_id}/intel").json()
+    items = data.get("items") or []
+    if category:
+        items = [i for i in items if i.get("category") == category]
+    if json_output:
+        sys.stdout.write(json.dumps({**data, "items": items}, indent=2) + "\n")
+        sys.stdout.flush()
+        return
+
+    counts = data.get("counts") or {}
+    console.print(
+        f"[bold]Engagement ID:[/bold] [cyan]{escape(eng_id)}[/cyan] | "
+        f"Flags: [red]{counts.get('flag', 0)}[/red] | Keys: [yellow]{counts.get('key', 0)}[/yellow] | "
+        f"Creds: {counts.get('credential', 0)} | IDs: {counts.get('identifier', 0)} | "
+        f"Names: {counts.get('name', 0)} | Numbers/Ports/IPs: {counts.get('number', 0)}"
+    )
+    table = Table(title=f"Exposed Keys, Flags, IDs, Names & Numbers ({len(items)})")
+    table.add_column("Category", style="magenta", no_wrap=True)
+    table.add_column("Label", overflow="fold")
+    table.add_column("Value", style="yellow", overflow="fold")
+    table.add_column("Location", overflow="fold")
+    table.add_column("Tool", no_wrap=True)
+    table.add_column("Finding ID", style="cyan", no_wrap=True)
+    for it in items:
+        val = it.get("value") if reveal or not it.get("sensitive") else it.get("masked_value")
+        table.add_row(
+            escape(str(it.get("category") or "-")),
+            escape(str(it.get("label") or "-")),
+            escape(str(val or "-")),
+            escape(str(it.get("location") or "-")),
+            escape(str(it.get("tool_source") or "-")),
+            escape(str(it.get("finding_id") or "-")),
+        )
+    console.print(table)
 
 
 def main() -> None:

@@ -56,7 +56,30 @@ async def persist_tool_result(
                 set(existing.technologies or []) | set(a.technologies or [])
             )
             if a.headers:
-                existing.headers = {**(existing.headers or {}), **a.headers}
+                merged_headers = {**(existing.headers or {}), **a.headers}
+                old_ports = (existing.headers or {}).get("ports")
+                new_ports = a.headers.get("ports")
+                if isinstance(old_ports, list) or isinstance(new_ports, list):
+                    combined_ports: dict[tuple[str, str], dict] = {}
+                    for prec in (old_ports or []):
+                        if isinstance(prec, dict) and "port" in prec:
+                            combined_ports[(str(prec.get("port")), str(prec.get("proto") or "tcp"))] = dict(prec)
+                    for prec in (new_ports or []):
+                        if isinstance(prec, dict) and "port" in prec:
+                            pkey = (str(prec.get("port")), str(prec.get("proto") or "tcp"))
+                            prev = combined_ports.get(pkey, {})
+                            merged_p = {**prev}
+                            for fk, fv in prec.items():
+                                if fv not in (None, "", "unknown"):
+                                    merged_p[fk] = fv
+                                elif fk not in merged_p:
+                                    merged_p[fk] = fv
+                            combined_ports[pkey] = merged_p
+                    merged_headers["ports"] = sorted(
+                        combined_ports.values(),
+                        key=lambda x: (int(x["port"]) if str(x.get("port", "")).isdigit() else 99999, str(x.get("proto") or "")),
+                    )
+                existing.headers = merged_headers
             batch_assets[a_key] = existing
         else:
             row = Asset(

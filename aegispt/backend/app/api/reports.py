@@ -66,11 +66,37 @@ async def export_report(
             media_type="text/x-shellscript; charset=utf-8",
         )
 
+    from app.core.intel_summary import build_intel_summary
+
+    intel_summary = build_intel_summary(
+        engagement=eng,
+        assets=assets,
+        endpoints=endpoints,
+        findings=findings,
+        runs=runs,
+    )
     return JSONResponse(
         content={
             "engagement": {"id": eng.id, "name": eng.name, "status": eng.status},
             "assets_count": len(assets),
             "endpoints_count": len(endpoints),
+            "intel_counts": intel_summary["counts"],
+            "open_ports": intel_summary["open_ports"],
+            "intel": intel_summary["items"],
+            "assets": [
+                {
+                    "id": a.id,
+                    "asset_type": a.asset_type,
+                    "value": a.value,
+                    "ip_address": a.ip_address,
+                    "status_code": a.status_code,
+                    "title": a.title,
+                    "waf": a.waf,
+                    "technologies": a.technologies,
+                    "headers": a.headers,
+                }
+                for a in assets
+            ],
             "findings": [
                 {
                     "id": f.id,

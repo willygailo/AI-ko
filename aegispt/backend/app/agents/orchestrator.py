@@ -18,6 +18,7 @@ from app.core.scope import ScopePolicy, ScopeViolationError
 from app.core.vault import decrypt_or_passthrough
 from app.db.database import session_scope
 from app.db.models import (
+    Asset,
     Engagement,
     Hypothesis,
     LLMProfile,
@@ -996,10 +997,15 @@ class EngagementOrchestrator:
         )
 
         try:
-            # Phase 1: Initial Tier-1 Recon Sweep
+            # Phase 1: Initial Tier-1 Recon Sweep (domain + IP/port + HTTP/HTTPS fallback)
+            from app.core.targets import is_ip_literal, is_lab_or_ctf_host
+
             for dom in scope.primary_domains()[:3]:
                 if self._stop_requested:
                     break
+                if is_ip_literal(dom) or is_lab_or_ctf_host(dom):
+                    # Skip external OSINT DNS tools for bare IPs or local /etc/hosts CTF domains
+                    continue
                 for d_tool, d_rat in [
                     ("subfinder", "Passive subdomain discovery for allowlisted domain."),
                     ("dnsx", "DNS record resolution & SPF/DMARC posture check."),
@@ -1014,19 +1020,122 @@ class EngagementOrchestrator:
                         agent_name="recon",
                     )
 
-            for seed_url in scope.primary_seed_urls()[:3]:
+            # Port & service discovery for HTB/CTF IPs, CIDRs, or host targets
+            port_targets: list[str] = []
+            for d in scope.primary_domains()[:3]:
+                if d not in port_targets:
+                    port_targets.append(d)
+            for seed in scope.primary_seed_urls()[:4]:
+                h = (urlparse(seed).hostname or "").lower()
+                if h and h not in port_targets:
+                    port_targets.append(h)
+            if scope.allowed_cidrs:
+                import ipaddress as _ipaddr
+
+                for cidr in scope.allowed_cidrs[:2]:
+                    try:
+                        net = _ipaddr.ip_network(cidr, strict=False)
+                        if net.num_addresses == 1:
+                            addr = str(net.network_address)
+                            if addr not in port_targets:
+                                port_targets.append(addr)
+                        elif net.num_addresses <= 16:
+                            for host_ip in list(net.hosts())[:8]:
+                                addr = str(host_ip)
+                                if addr not in port_targets:
+                                    port_targets.append(addr)
+                    except ValueError:
+                        pass
+
+            port_tool = None
+            if (eng.tier2_auto or eng.autonomy_mode == "lab_autopilot") and tool_registry.get("nmap").is_available()[0]:
+                port_tool = ("nmap", {"top_ports": 100}, "Discover open TCP ports and service versions on scoped host/IP.")
+            elif tool_registry.get("naabu").is_available()[0]:
+                port_tool = ("naabu", {"top_ports": 100}, "Fast passive/syn open port discovery on scoped host/IP.")
+
+            if port_tool and port_targets:
+                pt_name, pt_args, pt_rat = port_tool
+                for p_target in port_targets[:4]:
+                    if self._stop_requested:
+                        break
+                    await self._dispatch_tool(
+                        proposal=ProposedToolCall(tool_name=pt_name, target=p_target, args=pt_args, rationale=pt_rat),
+                        scope=scope,
+                        autonomy_mode=eng.autonomy_mode,
+                        tier2_auto=eng.tier2_auto,
+                        agent_name="recon",
+                    )
+
+            seed_urls = list(scope.primary_seed_urls()[:4])
+            # Convert newly discovered HTTP/HTTPS ports into additional seed URLs
+            async with session_scope() as session:
+                port_assets = (
+                    await session.execute(select(Asset).where(Asset.engagement_id == self.engagement_id))
+                ).scalars().all()
+            web_port_nums = {80, 443, 3000, 4000, 5000, 7000, 8000, 8008, 8080, 8443, 8888, 9000, 9090}
+            for pa in port_assets:
+                for tech in pa.technologies or []:
+                    if not str(tech).startswith("port:"):
+                        continue
+                    body = str(tech)[5:].split(" (", 1)[0]
+                    p_proto, _, svc = body.partition(":")
+                    p_str = p_proto.split("/", 1)[0]
+                    if not p_str.isdigit():
+                        continue
+                    p_int = int(p_str)
+                    if p_int in web_port_nums or "http" in svc.lower():
+                        scheme = "https" if p_int in {443, 8443} or "https" in svc.lower() else "http"
+                        netloc = f"[{pa.value}]" if ":" in pa.value else pa.value
+                        if (scheme == "http" and p_int == 80) or (scheme == "https" and p_int == 443):
+                            cand_seed = f"{scheme}://{netloc}"
+                        else:
+                            cand_seed = f"{scheme}://{netloc}:{p_int}"
+                        if cand_seed not in seed_urls:
+                            seed_urls.append(cand_seed)
+
+            explicit_https_urls = {u.lower() for u in scope.allowed_urls if u.lower().startswith("https://")}
+            for seed_url in seed_urls[:6]:
                 if self._stop_requested:
                     break
+                active_seed = seed_url
+                probe_ok = await self._dispatch_tool(
+                    proposal=ProposedToolCall(
+                        tool_name="http_probe",
+                        target=active_seed,
+                        args={"mode": "passive_audit"},
+                        rationale="Initial HTTP security header, CORS, cookie, JWT, intel & OpenAPI probe.",
+                    ),
+                    scope=scope,
+                    autonomy_mode=eng.autonomy_mode,
+                    tier2_auto=eng.tier2_auto,
+                    agent_name="recon",
+                )
+                if not probe_ok and active_seed.lower().startswith("https://") and active_seed.lower() not in explicit_https_urls:
+                    http_alt = "http://" + active_seed[len("https://") :]
+                    alt_ok = await self._dispatch_tool(
+                        proposal=ProposedToolCall(
+                            tool_name="http_probe",
+                            target=http_alt,
+                            args={"mode": "passive_audit"},
+                            rationale="HTTPS probe failed; retrying plain HTTP seed target for CTF/lab service.",
+                        ),
+                        scope=scope,
+                        autonomy_mode=eng.autonomy_mode,
+                        tier2_auto=eng.tier2_auto,
+                        agent_name="recon",
+                    )
+                    if alt_ok:
+                        active_seed = http_alt
+
                 recon_steps: list[tuple[str, dict[str, Any], str]] = [
-                    ("http_probe", {"mode": "passive_audit"}, "Initial HTTP security header, CORS, cookie, JWT & OpenAPI probe."),
-                    ("js_miner", {"max_bundles": 8}, "Extract hidden API routes, source maps, DOM sinks, and potential leaks from JS bundles."),
+                    ("js_miner", {"max_bundles": 8}, "Extract hidden API routes, source maps, DOM sinks, flags, IDs, keys, and credentials from JS bundles."),
                     ("whatweb", {"aggression": 1}, "Passive web technology stack fingerprinting."),
                     ("wafw00f", {}, "Detect protective WAF/CDN controls."),
                     ("katana", {"depth": 2, "js_crawl": True}, "Crawl HTML & JavaScript routes for endpoints and parameters."),
                 ]
-                if seed_url.lower().startswith("https://"):
+                if active_seed.lower().startswith("https://"):
                     recon_steps.insert(
-                        1,
+                        0,
                         ("sslscan", {}, "Audit TLS protocols, cipher suites, and certificate validity."),
                     )
                 for tool_name, t_args, rat in recon_steps:
@@ -1035,7 +1144,7 @@ class EngagementOrchestrator:
                     await self._dispatch_tool(
                         proposal=ProposedToolCall(
                             tool_name=tool_name,
-                            target=seed_url,
+                            target=active_seed,
                             args=t_args,
                             rationale=rat,
                         ),

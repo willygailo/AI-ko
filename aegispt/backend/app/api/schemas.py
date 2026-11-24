@@ -9,6 +9,7 @@ from app.config import get_settings
 
 
 class ScopePolicyInput(BaseModel):
+    targets: list[str] = Field(default_factory=list)
     allowed_domains: list[str] = Field(default_factory=list)
     allowed_urls: list[str] = Field(default_factory=list)
     allowed_cidrs: list[str] = Field(default_factory=list)
@@ -21,6 +22,7 @@ class ScopePolicyInput(BaseModel):
     secondary_headers: dict[str, str] = Field(default_factory=dict)
     secondary_cookies: dict[str, str] = Field(default_factory=dict)
     allow_private_ips: bool = False
+    ctf_mode: bool = False
 
 
 class SteerInput(BaseModel):

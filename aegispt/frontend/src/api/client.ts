@@ -15,6 +15,7 @@ export interface ScopePolicy {
 }
 
 export interface ScopePolicyInputPayload {
+  targets?: string[];
   allowed_domains?: string[];
   allowed_urls?: string[];
   allowed_cidrs?: string[];
@@ -27,6 +28,7 @@ export interface ScopePolicyInputPayload {
   secondary_headers?: Record<string, string>;
   secondary_cookies?: Record<string, string>;
   allow_private_ips?: boolean;
+  ctf_mode?: boolean;
 }
 
 export interface EngagementCreatePayload {
@@ -97,6 +99,42 @@ export interface Engagement {
   scope?: ScopePolicy;
 }
 
+export interface OpenPortRecord {
+  asset_id?: string;
+  host?: string;
+  ip_address?: string | null;
+  port: number | string;
+  proto: string;
+  state: string;
+  service: string;
+  product?: string;
+  version?: string;
+  banner: string;
+}
+
+export interface IntelItem {
+  category: "flag" | "key" | "credential" | "identifier" | "name" | "number" | string;
+  label: string;
+  value: string;
+  masked_value: string;
+  sensitive: boolean;
+  location: string;
+  tool_source: string;
+  finding_id: string | null;
+  asset_id?: string | null;
+}
+
+export interface IntelCounts {
+  total: number;
+  flag: number;
+  key: number;
+  credential: number;
+  identifier: number;
+  name: number;
+  number: number;
+  open_ports: number;
+}
+
 export interface AssetItem {
   id: string;
   asset_type: string;
@@ -106,6 +144,7 @@ export interface AssetItem {
   title: string | null;
   waf: string | null;
   technologies: string[];
+  headers?: Record<string, unknown>;
   discovered_by: string;
 }
 
@@ -254,6 +293,9 @@ export interface EngagementDetail extends Engagement {
   attack_chains?: AttackChainItem[];
   checklist_items?: SkillChecklistEntry[];
   oob_events?: OOBEventItem[];
+  intel?: IntelItem[];
+  intel_counts?: IntelCounts;
+  open_ports?: OpenPortRecord[];
 }
 
 export interface LLMProfileItem {

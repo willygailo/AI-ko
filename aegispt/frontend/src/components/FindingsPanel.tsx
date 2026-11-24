@@ -297,10 +297,23 @@ export const FindingsPanel: React.FC<Props> = React.memo(
                   </div>
                 )}
 
-                <div className="flex flex-wrap gap-2 text-[11px]">
+                <div className="flex flex-wrap gap-2 text-[11px] items-center">
+                  <button
+                    type="button"
+                    onClick={() => navigator.clipboard.writeText(selected.id)}
+                    className="px-2 py-0.5 rounded bg-slate-900 border border-slate-700 text-sky-300 font-mono hover:border-sky-500/60"
+                    title="Click to copy Finding ID"
+                  >
+                    ID: {selected.id}
+                  </button>
                   <span className="px-2 py-0.5 rounded bg-slate-800 text-cyan-300 uppercase font-semibold">
                     Status: {selected.status}
                   </span>
+                  {selected.parameter && (
+                    <span className="px-2 py-0.5 rounded bg-slate-800 text-amber-300 font-mono">
+                      Param: {selected.parameter}
+                    </span>
+                  )}
                   <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-300">
                     CVSS: {selected.cvss_score ?? "N/A"}
                   </span>

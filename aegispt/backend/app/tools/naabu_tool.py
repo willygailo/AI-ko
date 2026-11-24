@@ -54,6 +54,7 @@ class NaabuAdapter(BaseToolAdapter):
         self, *, target: str, args: BaseModel, stdout: str, stderr: str, work_dir: Path
     ) -> ToolResult:
         ports_by_host: dict[str, list[str]] = {}
+        port_records_by_host: dict[str, list[dict[str, object]]] = {}
         ips_by_host: dict[str, str] = {}
         ports_list: list[dict[str, object]] = []
 
@@ -72,6 +73,17 @@ class NaabuAdapter(BaseToolAdapter):
                 ips_by_host[host] = ip
             if port is not None:
                 ports_by_host.setdefault(host, []).append(f"port:{port}/tcp")
+                port_records_by_host.setdefault(host, []).append(
+                    {
+                        "port": port,
+                        "proto": "tcp",
+                        "state": "open",
+                        "service": "",
+                        "product": "",
+                        "version": "",
+                        "banner": "",
+                    }
+                )
                 ports_list.append({"host": host, "port": port, "ip": ip})
 
         assets = [
@@ -80,6 +92,7 @@ class NaabuAdapter(BaseToolAdapter):
                 value=h,
                 ip_address=ips_by_host.get(h),
                 technologies=sorted(set(p_tags)),
+                headers={"ports": port_records_by_host.get(h, [])},
                 discovered_by=self.name,
             )
             for h, p_tags in ports_by_host.items()

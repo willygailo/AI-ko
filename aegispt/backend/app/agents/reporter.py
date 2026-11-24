@@ -8,6 +8,7 @@ import shlex
 from datetime import datetime, timezone
 from typing import Any
 
+from app.core.intel_summary import build_intel_summary
 from app.db.models import Asset, AttackChain, Endpoint, Engagement, Finding, ToolRun
 
 _CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
@@ -117,21 +118,39 @@ def render_markdown_report(
         "",
         "## Attack Surface Summary",
         "",
-        "| Type | Host / Value | Status | WAF | Technologies |",
-        "| :--- | :--- | ---: | :--- | :--- |",
+        "| Asset ID | Type | Host / Value | IP Address | Status | WAF | Technologies & Ports |",
+        "| :--- | :--- | :--- | :--- | ---: | :--- | :--- |",
     ]
     for a in assets[:50]:
-        techs = ", ".join((a.technologies or [])[:6]) or "-"
+        techs = ", ".join((a.technologies or [])[:8]) or "-"
         lines.append(
-            f"| {a.asset_type} | `{a.value}` | {a.status_code or '-'} | {a.waf or '-'} | {techs} |"
+            f"| `{a.id}` | {a.asset_type} | `{a.value}` | `{a.ip_address or '-'}` | {a.status_code or '-'} | {a.waf or '-'} | {techs} |"
         )
+
+    intel = build_intel_summary(engagement=engagement, assets=assets, endpoints=endpoints, findings=findings, runs=runs)
+    if intel["items"]:
+        lines.extend(
+            [
+                "",
+                f"## Extracted Intelligence — Flags, Keys, IDs, Names & Numbers ({len(intel['items'])})",
+                "",
+                "| Category | Label | Value | Location | Tool | Finding ID |",
+                "| :--- | :--- | :--- | :--- | :--- | :--- |",
+            ]
+        )
+        for item in intel["items"][:100]:
+            val_esc = str(item["value"]).replace("|", "\\|").replace("\n", " ")[:120]
+            loc_esc = str(item.get("location") or "-").replace("|", "\\|")[:60]
+            lines.append(
+                f"| `{item['category']}` | {item['label']} | `{val_esc}` | `{loc_esc}` | `{item['tool_source']}` | `{item.get('finding_id') or '-'}` |"
+            )
 
     if chains:
         lines.extend(["", "## Synthesized Attack Chains", ""])
         for c_idx, ch in enumerate(chains, start=1):
             lines.extend(
                 [
-                    f"### Chain {c_idx}. [{ch.severity.upper()}] {ch.title}",
+                    f"### Chain {c_idx}. [{ch.severity.upper()}] {ch.title} (`{ch.id}`)",
                     "",
                     f"- **Target:** `{ch.target_url}`",
                     f"- **Risk Summary:** {ch.risk_summary}",
@@ -149,10 +168,10 @@ def render_markdown_report(
             [
                 f"### {idx}. [{f.severity.upper()}] {f.title}",
                 "",
+                f"- **Finding ID:** `{f.id}` | **Status:** `{f.status}` | **Source Tool:** `{f.tool_source}`",
                 f"- **Target:** `{f.target_url}`",
                 f"- **Parameter:** `{f.parameter or 'N/A'}`",
                 f"- **CVSS:** `{f.cvss_score if f.cvss_score is not None else 'N/A'}` | **CWE:** `{f.cwe_id or 'N/A'}` | **OWASP:** `{f.owasp_category or 'N/A'}`",
-                f"- **Source Tool:** `{f.tool_source}` | **Status:** `{f.status}`",
                 "",
                 "**Description**",
                 "",
@@ -226,6 +245,7 @@ def render_html_report(
                 <h3>{idx}. {html.escape(f.title)}</h3>
               </div>
               <div class="meta">
+                <span><strong>ID:</strong> <code>{html.escape(f.id)}</code></span>
                 <span><strong>Target:</strong> <code>{html.escape(f.target_url)}</code></span>
                 <span><strong>Param:</strong> <code>{html.escape(f.parameter or 'N/A')}</code></span>
                 <span><strong>CWE:</strong> {html.escape(f.cwe_id or 'N/A')}</span>
@@ -240,11 +260,22 @@ def render_html_report(
             """
         )
 
+    intel = build_intel_summary(engagement=engagement, assets=assets, endpoints=endpoints, findings=findings, runs=runs)
+    intel_rows = "".join(
+        f"<tr><td><code>{html.escape(str(item['category']))}</code></td>"
+        f"<td>{html.escape(str(item['label']))}</td>"
+        f"<td><code>{html.escape(str(item['value'])[:140])}</code></td>"
+        f"<td><code>{html.escape(str(item.get('location') or '-'))}</code></td>"
+        f"<td><code>{html.escape(str(item.get('finding_id') or '-'))}</code></td></tr>"
+        for item in intel["items"][:100]
+    )
+
     asset_rows = "".join(
-        f"<tr><td>{html.escape(a.asset_type)}</td><td><code>{html.escape(a.value)}</code></td>"
+        f"<tr><td><code>{html.escape(a.id)}</code></td><td>{html.escape(a.asset_type)}</td><td><code>{html.escape(a.value)}</code></td>"
+        f"<td><code>{html.escape(a.ip_address or '-')}</code></td>"
         f"<td>{html.escape(str(a.status_code or '-'))}</td>"
         f"<td>{html.escape(a.waf or '-')}</td>"
-        f"<td>{html.escape(', '.join((a.technologies or [])[:6]) or '-')}</td></tr>"
+        f"<td>{html.escape(', '.join((a.technologies or [])[:8]) or '-')}</td></tr>"
         for a in assets[:60]
     )
 
@@ -337,8 +368,15 @@ def render_html_report(
     <section>
       <h2>Discovered Assets</h2>
       <table>
-        <thead><tr><th>Type</th><th>Value</th><th>Status</th><th>WAF</th><th>Technologies</th></tr></thead>
-        <tbody>{asset_rows or '<tr><td colspan="5">No assets recorded.</td></tr>'}</tbody>
+        <thead><tr><th>Asset ID</th><th>Type</th><th>Host / Value</th><th>IP</th><th>Status</th><th>WAF</th><th>Technologies &amp; Ports</th></tr></thead>
+        <tbody>{asset_rows or '<tr><td colspan="7">No assets recorded.</td></tr>'}</tbody>
+      </table>
+    </section>
+    <section>
+      <h2>Extracted Intelligence — Flags, Keys, IDs, Names &amp; Numbers ({len(intel['items'])})</h2>
+      <table>
+        <thead><tr><th>Category</th><th>Label</th><th>Value</th><th>Location</th><th>Finding ID</th></tr></thead>
+        <tbody>{intel_rows or '<tr><td colspan="5">No extracted intelligence recorded.</td></tr>'}</tbody>
       </table>
     </section>
     {chains_html}

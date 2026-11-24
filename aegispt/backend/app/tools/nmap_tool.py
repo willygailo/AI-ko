@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 from xml.etree.ElementTree import ParseError as XMLParseError
 
@@ -71,6 +72,7 @@ class NmapAdapter(BaseToolAdapter):
                     value = (hostname or ip_addr or self._extract_host(target)).lower()
 
                     techs: list[str] = []
+                    host_ports: list[dict[str, Any]] = []
                     for port_el in host_el.findall("ports/port"):
                         state_el = port_el.find("state")
                         if state_el is not None and state_el.attrib.get("state") != "open":
@@ -84,6 +86,16 @@ class NmapAdapter(BaseToolAdapter):
                         banner = " ".join(x for x in (product, version) if x).strip()
                         label = f"port:{port_id}/{proto}:{svc_name}" + (f" ({banner})" if banner else "")
                         techs.append(label)
+                        port_rec = {
+                            "port": int(port_id) if port_id.isdigit() else port_id,
+                            "proto": proto,
+                            "state": "open",
+                            "service": svc_name,
+                            "product": product,
+                            "version": version,
+                            "banner": banner,
+                        }
+                        host_ports.append(port_rec)
                         ports_summary.append({"port": f"{port_id}/{proto}", "service": svc_name, "banner": banner})
 
                     assets.append(
@@ -92,6 +104,7 @@ class NmapAdapter(BaseToolAdapter):
                             value=value,
                             ip_address=ip_addr,
                             technologies=techs,
+                            headers={"ports": host_ports} if host_ports else {},
                             discovered_by=self.name,
                         )
                     )

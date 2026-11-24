@@ -17,6 +17,7 @@ export const ScopeWizardModal: React.FC<Props> = ({ profiles, onCreated, onClose
 
   const [name, setName] = useState("");
   const [objective, setObjective] = useState("Comprehensive Web Application & API Security Assessment");
+  const [quickTargetsText, setQuickTargetsText] = useState("");
   const [urlsText, setUrlsText] = useState("");
   const [domainsText, setDomainsText] = useState("");
   const [cidrsText, setCidrsText] = useState("");
@@ -30,15 +31,34 @@ export const ScopeWizardModal: React.FC<Props> = ({ profiles, onCreated, onClose
   const [mode, setMode] = useState<"tiered" | "copilot" | "lab_autopilot">("tiered");
   const [tier2Auto, setTier2Auto] = useState(true);
   const [allowPrivateIps, setAllowPrivateIps] = useState(false);
+  const [ctfMode, setCtfMode] = useState(false);
   const [maxRps, setMaxRps] = useState(15);
   const [maxSteps, setMaxSteps] = useState(20);
   const [llmProfileId, setLlmProfileId] = useState<string>(defaultProfileId);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
+  const loadCtfPreset = () => {
+    setName("HTB / CTF Lab Box");
+    setObjective("CTF & HTB Lab Enumeration: Ports, Flags, Keys, IDs, Credentials & Exploitable Services");
+    if (!quickTargetsText.trim() && !urlsText.trim() && !domainsText.trim() && !cidrsText.trim()) {
+      setQuickTargetsText("10.10.11.1\nhttp://target.htb");
+    }
+    setExcludedHostsText("");
+    setExcludedPathsText("");
+    setMode("lab_autopilot");
+    setTier2Auto(true);
+    setAllowPrivateIps(true);
+    setCtfMode(true);
+    setMaxRps(25);
+    setMaxSteps(30);
+    setError("");
+  };
+
   const loadJuiceShopPreset = () => {
     setName("Local Juice Shop Assessment");
     setObjective("Comprehensive Web Application & API Security Assessment");
+    setQuickTargetsText("http://127.0.0.1:3000");
     setUrlsText("http://127.0.0.1:3000");
     setDomainsText("");
     setCidrsText("");
@@ -47,6 +67,7 @@ export const ScopeWizardModal: React.FC<Props> = ({ profiles, onCreated, onClose
     setMode("tiered");
     setTier2Auto(true);
     setAllowPrivateIps(true);
+    setCtfMode(true);
     setMaxRps(15);
     setMaxSteps(20);
     setError("");
@@ -55,11 +76,17 @@ export const ScopeWizardModal: React.FC<Props> = ({ profiles, onCreated, onClose
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
+    const quickTargets = splitLines(quickTargetsText);
     const allowedUrls = splitLines(urlsText);
     const allowedDomains = splitLines(domainsText);
     const allowedCidrs = splitLines(cidrsText);
-    if (allowedUrls.length === 0 && allowedDomains.length === 0 && allowedCidrs.length === 0) {
-      setError("Provide at least one allowlisted URL, domain, or CIDR block.");
+    if (
+      quickTargets.length === 0 &&
+      allowedUrls.length === 0 &&
+      allowedDomains.length === 0 &&
+      allowedCidrs.length === 0
+    ) {
+      setError("Provide at least one target (URL, Domain, IP, IP:Port, or CIDR).");
       return;
     }
 
@@ -73,6 +100,7 @@ export const ScopeWizardModal: React.FC<Props> = ({ profiles, onCreated, onClose
         max_steps: Math.min(60, Math.max(1, Math.round(maxSteps) || 20)),
         llm_profile_id: llmProfileId || null,
         scope: {
+          targets: quickTargets,
           allowed_urls: allowedUrls,
           allowed_domains: allowedDomains,
           allowed_cidrs: allowedCidrs,
@@ -83,7 +111,8 @@ export const ScopeWizardModal: React.FC<Props> = ({ profiles, onCreated, onClose
           secondary_headers: parseKVLines(secHeadersText, ":"),
           secondary_cookies: parseKVLines(secCookiesText, "="),
           max_rps: Math.min(100, Math.max(1, Math.round(maxRps) || 15)),
-          allow_private_ips: allowPrivateIps,
+          allow_private_ips: allowPrivateIps || ctfMode,
+          ctf_mode: ctfMode,
         },
       });
       await onCreated(created.id);
@@ -107,14 +136,24 @@ export const ScopeWizardModal: React.FC<Props> = ({ profiles, onCreated, onClose
       disableClose={loading}
       maxWidthClass="max-w-2xl"
       headerExtra={
-        <button
-          type="button"
-          onClick={loadJuiceShopPreset}
-          className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-[11px] font-medium text-cyan-300 focus:outline-none focus:ring-2 focus:ring-cyan-500"
-        >
-          <FlaskConical className="w-3.5 h-3.5" aria-hidden="true" />
-          Load Juice Shop Lab Preset
-        </button>
+        <div className="flex flex-wrap items-center gap-1.5">
+          <button
+            type="button"
+            onClick={loadCtfPreset}
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-950/60 hover:bg-emerald-900/60 border border-emerald-700/60 text-[11px] font-medium text-emerald-300 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+          >
+            <FlaskConical className="w-3.5 h-3.5" aria-hidden="true" />
+            Load HTB / CTF Lab Preset
+          </button>
+          <button
+            type="button"
+            onClick={loadJuiceShopPreset}
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-[11px] font-medium text-cyan-300 focus:outline-none focus:ring-2 focus:ring-cyan-500"
+          >
+            <FlaskConical className="w-3.5 h-3.5" aria-hidden="true" />
+            Load Juice Shop Lab Preset
+          </button>
+        </div>
       }
       footer={
         <>
@@ -166,10 +205,33 @@ export const ScopeWizardModal: React.FC<Props> = ({ profiles, onCreated, onClose
           />
         </div>
 
+        <div className="bg-slate-950/80 border border-cyan-900/50 rounded-lg p-3">
+          <label htmlFor={`${idPrefix}-quick-targets`} className="block text-cyan-300 font-semibold mb-1">
+            Quick Targets — URL, Domain, IP, IP:Port, or CIDR (Recommended for HTB / CTF)
+          </label>
+          <textarea
+            id={`${idPrefix}-quick-targets`}
+            rows={2}
+            value={quickTargetsText}
+            onChange={(e) => {
+              const nextVal = e.target.value;
+              setQuickTargetsText(nextVal);
+              if (/\b(?:10\.|127\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.|localhost)\b|\.(?:htb|thm|local|internal|lan|ctf)\b/i.test(nextVal)) {
+                setAllowPrivateIps(true);
+              }
+            }}
+            placeholder="10.10.11.42&#10;10.10.11.42:8080&#10;target.htb&#10;https://app.example.com"
+            className="w-full bg-slate-900 border border-slate-800 rounded-lg p-2 font-mono text-emerald-300 focus:outline-none focus:ring-2 focus:ring-cyan-500"
+          />
+          <p className="text-[10px] text-slate-400 mt-1">
+            Automatically splits URLs, domains, bare IPs, ports, and CIDRs; auto-enables private/HTB lab IPs when detected.
+          </p>
+        </div>
+
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           <div>
             <label htmlFor={`${idPrefix}-urls`} className="block text-slate-300 font-medium mb-1">
-              Allowlisted URLs
+              Allowlisted URLs (optional)
             </label>
             <textarea
               id={`${idPrefix}-urls`}

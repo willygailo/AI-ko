@@ -94,6 +94,7 @@ class GitleaksAdapter(BaseToolAdapter):
     ) -> ToolResult:
         report_file = work_dir / "gitleaks.json"
         findings: list[DiscoveredFinding] = []
+        intel_items: list[dict[str, object]] = []
         if report_file.is_file():
             try:
                 items = json.loads(report_file.read_text(encoding="utf-8"))
@@ -107,7 +108,19 @@ class GitleaksAdapter(BaseToolAdapter):
                     if (rule_id, file_name) in seen:
                         continue
                     seen.add((rule_id, file_name))
-                    secret_preview = _mask_secret(str(item.get("Secret") or item.get("Match") or "REDACTED"))
+                    raw_val = str(item.get("Secret") or item.get("Match") or "REDACTED")
+                    secret_preview = _mask_secret(raw_val)
+                    intel_items.append(
+                        {
+                            "category": "key",
+                            "label": f"Gitleaks ({rule_id})",
+                            "value": raw_val,
+                            "masked_value": secret_preview,
+                            "sensitive": True,
+                            "location": file_name,
+                            "tool_source": self.name,
+                        }
+                    )
                     findings.append(
                         DiscoveredFinding(
                             title=f"Gitleaks Detected Secret Pattern ({rule_id}) in '{file_name}'",
@@ -117,7 +130,11 @@ class GitleaksAdapter(BaseToolAdapter):
                             owasp_category="A07:2021 - Identification and Authentication Failures",
                             cvss_score=5.5,
                             description=f"Gitleaks matched rule `{rule_id}` in captured target file `{file_name}`.",
-                            evidence={"rule_id": rule_id, "artifact": file_name, "masked_sample": secret_preview},
+                            evidence={
+                                "rule_id": rule_id,
+                                "artifact": file_name,
+                                "masked_sample": secret_preview,
+                            },
                             remediation="Remove secrets from client-side code/configs and rotate affected credentials.",
                             tool_source=self.name,
                         )
@@ -127,5 +144,5 @@ class GitleaksAdapter(BaseToolAdapter):
             exit_code=0,
             duration_ms=0,
             findings=findings,
-            summary={"findings_count": len(findings)},
+            summary={"findings_count": len(findings), "extracted_intel": intel_items},
         )

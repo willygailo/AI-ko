@@ -6,6 +6,7 @@ import json
 import re
 import shlex
 from pathlib import Path
+from typing import Any
 from urllib.parse import urljoin, urlparse
 
 import httpx
@@ -53,8 +54,13 @@ def _extract_body_keys(js_text: str) -> list[str]:
     return sorted(keys)
 
 
-def analyze_js_text(js_text: str, source_url: str) -> tuple[list[DiscoveredEndpoint], list[DiscoveredFinding]]:
-    """Extract hidden API paths, JSON body keys, DOM sink indicators, and masked secrets from JS."""
+def analyze_js_text(
+    js_text: str,
+    source_url: str,
+    *,
+    expose_raw: bool = False,
+) -> tuple[list[DiscoveredEndpoint], list[DiscoveredFinding]]:
+    """Extract hidden API paths, JSON body keys, DOM sink indicators, flags, IDs, names, and secrets from JS."""
     endpoints: list[DiscoveredEndpoint] = []
     findings: list[DiscoveredFinding] = []
     parsed = urlparse(source_url)
@@ -78,11 +84,30 @@ def analyze_js_text(js_text: str, source_url: str) -> tuple[list[DiscoveredEndpo
             if len(seen_paths) >= 100:
                 break
 
+    from app.tools.intel_extractor import extract_intel_from_text
+
     seen_kinds: set[str] = set()
     for kind, pat in JS_SECRET_PATTERNS:
         m = pat.search(js_text)
         if m and kind not in seen_kinds:
             seen_kinds.add(kind)
+            raw_secret = m.group(1)
+            ev_obj: dict[str, Any] = {
+                "secret_type": kind,
+                "masked_sample": _mask_secret(raw_secret),
+            }
+            if expose_raw:
+                ev_obj["extracted_intel"] = [
+                    {
+                        "category": "key",
+                        "label": kind,
+                        "value": raw_secret,
+                        "masked_value": _mask_secret(raw_secret),
+                        "sensitive": True,
+                        "location": source_url,
+                        "tool_source": "js_miner",
+                    }
+                ]
             findings.append(
                 DiscoveredFinding(
                     title=f"Potential {kind} Exposed in Client JavaScript",
@@ -92,11 +117,66 @@ def analyze_js_text(js_text: str, source_url: str) -> tuple[list[DiscoveredEndpo
                     owasp_category="A07:2021 - Identification and Authentication Failures",
                     cvss_score=7.5 if "Private Key" in kind else 5.8,
                     description=f"JavaScript bundle `{source_url}` contains a pattern matching {kind}.",
-                    evidence={"secret_type": kind, "masked_sample": _mask_secret(m.group(1))},
+                    evidence=ev_obj,
                     remediation="Remove hardcoded credentials and private keys from client-side bundles and rotate any exposed tokens.",
                     tool_source="js_miner",
                 )
             )
+
+    intel_hits = extract_intel_from_text(
+        js_text,
+        source_url=source_url,
+        tool_source="js_miner",
+        include_html_comments=False,
+    )
+    flag_or_cred_hits = [
+        h
+        for h in intel_hits
+        if h["category"] in {"flag", "credential", "key"} and h["label"] not in seen_kinds
+    ]
+    meta_hits = [h for h in intel_hits if h["category"] in {"identifier", "name", "number"}]
+    if flag_or_cred_hits:
+        has_flag = any(h["category"] == "flag" for h in flag_or_cred_hits)
+        ev_intel = [
+            h
+            if (expose_raw or not h.get("sensitive") or h.get("category") == "flag")
+            else {**h, "value": h["masked_value"]}
+            for h in flag_or_cred_hits[:25]
+        ]
+        findings.append(
+            DiscoveredFinding(
+                title=f"Extracted Flags / Credentials / Keys from JS ({len(flag_or_cred_hits)})",
+                severity="critical" if has_flag else "high",
+                target_url=source_url,
+                cwe_id="CWE-798",
+                owasp_category="A07:2021 - Identification and Authentication Failures",
+                cvss_score=9.1 if has_flag else 7.5,
+                description=(
+                    f"JavaScript bundle `{source_url}` exposed {len(flag_or_cred_hits)} credential/key/flag value(s): "
+                    + ", ".join(f"{h['label']}={h['value']}" for h in ev_intel[:4])
+                ),
+                evidence={"url": source_url, "count": len(flag_or_cred_hits), "extracted_intel": ev_intel},
+                remediation="Remove embedded flags, credentials, and API keys from client-side bundles.",
+                tool_source="js_miner",
+            )
+        )
+    if meta_hits:
+        findings.append(
+            DiscoveredFinding(
+                title=f"Exposed Identifiers, Names & Lab IPs in JS ({len(meta_hits)})",
+                severity="info",
+                target_url=source_url,
+                cwe_id="CWE-200",
+                owasp_category="A05:2021 - Security Misconfiguration",
+                description=(
+                    f"JavaScript bundle `{source_url}` revealed {len(meta_hits)} ID/name/email/IP artifact(s): "
+                    + ", ".join(f"{h['label']}={h['value']}" for h in meta_hits[:5])
+                ),
+                evidence={"url": source_url, "count": len(meta_hits), "extracted_intel": meta_hits[:30]},
+                remediation="Audit exposed identifiers, emails, and internal IP addresses in public client scripts.",
+                tool_source="js_miner",
+            )
+        )
 
     dom_sinks = sorted({m.group(1).strip() for m in DOM_SINK_RE.finditer(js_text[:300000])})
     if dom_sinks:
@@ -151,6 +231,8 @@ class JsMinerAdapter(BaseToolAdapter):
         endpoints: list[DiscoveredEndpoint] = []
         findings: list[DiscoveredFinding] = []
         scanned_bundles: list[str] = []
+        raw_intel: list[dict[str, Any]] = []
+        from app.tools.intel_extractor import extract_intel_from_text
 
         async with httpx.AsyncClient(
             verify=False,
@@ -169,9 +251,10 @@ class JsMinerAdapter(BaseToolAdapter):
                     cand = urljoin(target, m.group(1))
                     if cand not in bundle_urls:
                         bundle_urls.append(cand)
-                eps, fnds = analyze_js_text(resp.text[:200000], target)
+                eps, fnds = analyze_js_text(resp.text[:200000], target, expose_raw=scope.allow_private_ips)
                 endpoints.extend(eps)
                 findings.extend(fnds)
+                raw_intel.extend(extract_intel_from_text(resp.text[:200000], source_url=target, tool_source=self.name, include_html_comments=True))
 
             for bu in bundle_urls[: args.max_bundles]:
                 try:
@@ -180,9 +263,10 @@ class JsMinerAdapter(BaseToolAdapter):
                     r = await client.get(bu, headers=headers)
                     if r.status_code == 200:
                         scanned_bundles.append(bu)
-                        eps, fnds = analyze_js_text(r.text[:500000], bu)
+                        eps, fnds = analyze_js_text(r.text[:500000], bu, expose_raw=scope.allow_private_ips)
                         endpoints.extend(eps)
                         findings.extend(fnds)
+                        raw_intel.extend(extract_intel_from_text(r.text[:500000], source_url=bu, tool_source=self.name))
 
                         # Check for exposed sourceMap reference
                         sm_match = SOURCE_MAP_RE.search(r.text[-4096:])
@@ -237,5 +321,6 @@ class JsMinerAdapter(BaseToolAdapter):
                 "bundles_scanned": len(scanned_bundles),
                 "routes_extracted": len(endpoints),
                 "findings_count": len(findings),
+                "extracted_intel": raw_intel[:60],
             },
         )

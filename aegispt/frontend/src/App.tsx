@@ -46,6 +46,7 @@ import {
 } from "./api/client";
 import { AgentStreamPanel } from "./components/AgentStreamPanel";
 import { ApprovalModal } from "./components/ApprovalModal";
+import { AssetsIntelPanel } from "./components/AssetsIntelPanel";
 import { AttackGraph } from "./components/AttackGraph";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { FindingsPanel } from "./components/FindingsPanel";
@@ -60,6 +61,7 @@ import { parseJsonObject } from "./utils/parsing";
 
 type WorkspaceTab =
   | "graph"
+  | "assets_intel"
   | "chains"
   | "checklist"
   | "endpoints"
@@ -643,6 +645,10 @@ export default function App() {
   const tabs: { id: WorkspaceTab; label: string }[] = detail
     ? [
         { id: "graph", label: "Attack Graph" },
+        {
+          id: "assets_intel",
+          label: `Assets & Intel (${detail.assets.length}/${detail.intel?.length ?? 0})`,
+        },
         { id: "chains", label: `Chains (${detail.attack_chains?.length || 0})` },
         {
           id: "checklist",
@@ -690,9 +696,27 @@ export default function App() {
           </select>
 
           {detail && (
-            <span className="text-[11px] px-2 py-0.5 rounded-full bg-slate-800 border border-slate-700 text-cyan-300 uppercase font-semibold">
-              {detail.status} • {detail.autonomy_mode}
-            </span>
+            <>
+              <span className="text-[11px] px-2 py-0.5 rounded-full bg-slate-800 border border-slate-700 text-cyan-300 uppercase font-semibold">
+                {detail.status} • {detail.autonomy_mode}
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  void copyTextToClipboard(detail.id);
+                  pushToast("success", `Copied Engagement ID ${detail.id}`);
+                }}
+                className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full bg-slate-950 border border-slate-700 text-sky-300 font-mono hover:border-sky-500/60"
+                title={`Copy Engagement ID: ${detail.id}`}
+              >
+                <Copy className="w-3 h-3" />
+                {detail.id.slice(0, 8)}
+              </button>
+              <span className="text-[11px] px-2 py-0.5 rounded-full bg-slate-950 border border-slate-800 text-slate-300 font-mono">
+                Ports: {detail.open_ports?.length ?? 0} • Flags/Keys:{" "}
+                {(detail.intel_counts?.flag ?? 0) + (detail.intel_counts?.key ?? 0)}
+              </span>
+            </>
           )}
 
           {loadingDetail && (
@@ -925,6 +949,18 @@ export default function App() {
                 />
               )}
 
+              {activeTab === "assets_intel" && (
+                <AssetsIntelPanel
+                  engagementId={detail.id}
+                  scope={detail.scope}
+                  assets={detail.assets}
+                  openPorts={detail.open_ports}
+                  intel={detail.intel}
+                  onPivotRepeater={(url) => handleSendToRepeater(url)}
+                  onSelectFinding={() => setActiveTab("findings")}
+                />
+              )}
+
               {activeTab === "chains" && (
                 <div className="h-full flex flex-col bg-slate-900/60 border border-slate-800 rounded-xl overflow-hidden text-xs min-h-[360px]">
                   <div className="flex items-center justify-between px-4 py-2.5 border-b border-slate-800 bg-slate-900">
@@ -1029,7 +1065,9 @@ export default function App() {
                     <table className="w-full text-left text-xs">
                       <thead className="sticky top-0 z-10 bg-slate-900 text-slate-400 border-b border-slate-800">
                         <tr>
+                          <th className="p-2.5">ID</th>
                           <th className="p-2.5">Method</th>
+                          <th className="p-2.5">Status</th>
                           <th className="p-2.5">URL</th>
                           <th className="p-2.5">Params</th>
                           <th className="p-2.5">Source</th>
@@ -1039,14 +1077,20 @@ export default function App() {
                       <tbody className="divide-y divide-slate-800/70">
                         {filteredEndpoints.length === 0 && (
                           <tr>
-                            <td colSpan={5} className="p-6 text-center text-slate-500">
+                            <td colSpan={7} className="p-6 text-center text-slate-500">
                               No discovered endpoints match the current filter.
                             </td>
                           </tr>
                         )}
                         {filteredEndpoints.map((ep) => (
                           <tr key={ep.id} className="hover:bg-slate-800/40">
+                            <td className="p-2.5 font-mono text-[10px] text-sky-400" title={ep.id}>
+                              {ep.id.slice(0, 8)}
+                            </td>
                             <td className="p-2.5 font-mono font-semibold text-indigo-300">{ep.method}</td>
+                            <td className="p-2.5 font-mono text-[11px] text-slate-300">
+                              {ep.status_code ?? "-"}
+                            </td>
                             <td className="p-2.5 font-mono text-slate-200 truncate max-w-[230px]" title={ep.url}>
                               {ep.url}
                             </td>
@@ -1152,6 +1196,7 @@ export default function App() {
                   <table className="w-full text-left text-xs">
                     <thead className="sticky top-0 z-10 bg-slate-900 text-slate-400 border-b border-slate-800">
                       <tr>
+                        <th className="p-3">Run ID</th>
                         <th className="p-3">Tool</th>
                         <th className="p-3">Tier</th>
                         <th className="p-3">Target</th>
@@ -1163,13 +1208,16 @@ export default function App() {
                     <tbody className="divide-y divide-slate-800/70">
                       {detail.tool_runs.length === 0 && (
                         <tr>
-                          <td colSpan={6} className="p-6 text-center text-slate-500">
+                          <td colSpan={7} className="p-6 text-center text-slate-500">
                             No tool runs recorded yet.
                           </td>
                         </tr>
                       )}
                       {detail.tool_runs.map((r) => (
                         <tr key={r.id} className="hover:bg-slate-800/40 align-top">
+                          <td className="p-3 font-mono text-[10px] text-sky-400" title={r.id}>
+                            {r.id.slice(0, 8)}
+                          </td>
                           <td className="p-3 font-mono text-cyan-300">{r.tool_name}</td>
                           <td className="p-3">Tier {r.tier}</td>
                           <td className="p-3 font-mono text-slate-300 truncate max-w-[200px]" title={r.target}>

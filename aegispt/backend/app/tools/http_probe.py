@@ -466,6 +466,65 @@ class HttpProbeAdapter(BaseToolAdapter):
                 )
                 findings.extend(audit_jwt_candidates(jwt_sources, final_url, self.name))
 
+                # Extract CTF flags, keys, credentials, IDs, emails/names, HTML comments, and internal IPs
+                from app.tools.intel_extractor import extract_intel_from_text
+
+                hdr_blob = "\n".join(f"{k}: {v}" for k, v in resp.headers.items())
+                intel_hits = extract_intel_from_text(
+                    f"{hdr_blob}\n{resp.text[:250_000]}",
+                    source_url=final_url,
+                    tool_source=self.name,
+                    include_html_comments=True,
+                )
+                if intel_hits:
+                    high_cats = [x for x in intel_hits if x["category"] in {"flag", "key", "credential"}]
+                    other_cats = [x for x in intel_hits if x["category"] not in {"flag", "key", "credential"}]
+                    if high_cats:
+                        findings.append(
+                            DiscoveredFinding(
+                                title=f"Exposed Flags / Keys / Credentials in HTTP Response ({len(high_cats)})",
+                                severity="critical" if any(x["category"] == "flag" or x["severity"] == "critical" for x in high_cats) else "high",
+                                target_url=final_url,
+                                cwe_id="CWE-200",
+                                owasp_category="A02:2021 - Cryptographic Failures",
+                                cvss_score=9.1 if any(x["category"] == "flag" for x in high_cats) else 7.5,
+                                description=(
+                                    f"HTTP response from {final_url} exposed {len(high_cats)} sensitive token(s)/flag(s)/credential(s): "
+                                    + ", ".join(f"{x['label']}={x['value']}" for x in high_cats[:5])
+                                ),
+                                evidence={
+                                    "url": final_url,
+                                    "count": len(high_cats),
+                                    "extracted_intel": high_cats[:25],
+                                },
+                                poc_command=f"curl -s -i {shlex.quote(final_url)}",
+                                remediation="Remove hardcoded secrets, tokens, credentials, and sensitive debug banners from HTTP responses.",
+                                tool_source=self.name,
+                            )
+                        )
+                    if other_cats:
+                        findings.append(
+                            DiscoveredFinding(
+                                title=f"Exposed Identifiers, Names, Comments & Lab IPs ({len(other_cats)})",
+                                severity="info",
+                                target_url=final_url,
+                                cwe_id="CWE-200",
+                                owasp_category="A05:2021 - Security Misconfiguration",
+                                description=(
+                                    f"HTTP response metadata revealed {len(other_cats)} identifier(s)/name(s)/comment(s)/internal IP(s): "
+                                    + ", ".join(f"{x['label']}={x['value']}" for x in other_cats[:6])
+                                ),
+                                evidence={
+                                    "url": final_url,
+                                    "count": len(other_cats),
+                                    "extracted_intel": other_cats[:30],
+                                },
+                                poc_command=f"curl -s {shlex.quote(final_url)}",
+                                remediation="Review whether leaked identifiers, developer HTML comments, or internal IPs assist reconnaissance.",
+                                tool_source=self.name,
+                            )
+                        )
+
                 # Multi-Origin CORS matrix check
                 if args.check_cors:
                     probe_origins = [

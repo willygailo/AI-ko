@@ -211,12 +211,17 @@ export function buildAttackGraphLayout(
   filteredAssets.forEach((a, idx) => {
     const y = ((idx + 1) / (filteredAssets.length + 1)) * canvasHeight;
     const nid = `asset-${a.id}`;
+    const defaultScheme =
+      /^(10\.|127\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|localhost$)/i.test(a.value) ||
+      /\.(htb|thm|local|internal|lan|ctf)$/i.test(a.value)
+        ? "http"
+        : "https";
     gNodes.push({
       id: nid,
       label: truncateText(a.value, 18),
       sublabel: truncateText(`${a.asset_type}${a.status_code ? ` • ${a.status_code}` : ""}`, 22),
       kind: "asset",
-      pivotUrl: a.value.includes("://") ? a.value : `https://${a.value}`,
+      pivotUrl: a.value.includes("://") ? a.value : `${defaultScheme}://${a.value}`,
       x: colX.asset,
       y,
       raw: a,

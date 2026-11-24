@@ -246,6 +246,8 @@ class ScopePolicy:
             for dom in self.allowed_domains:
                 if self._host_matches_pattern(host, dom):
                     allowed = True
+                    if ip_obj is not None:
+                        explicitly_ip_allowed = True
                     break
 
         norm_req_path = self._normalize_path(path, decode=True)
@@ -360,21 +362,41 @@ class ScopePolicy:
         return norm_target
 
     def primary_seed_urls(self) -> list[str]:
+        from app.core.targets import is_ip_literal, preferred_scheme_for_host
+
         seeds: list[str] = []
         for u in self.allowed_urls:
-            seeds.append(u if "://" in u else f"https://{u}")
+            if "://" in u:
+                seed = u
+            else:
+                host_part = u.split("/", 1)[0].rsplit(":", 1)[0]
+                scheme = preferred_scheme_for_host(host_part)
+                seed = f"{scheme}://{u}"
+            if seed not in seeds:
+                seeds.append(seed)
         for d in self.allowed_domains:
             clean = d.lstrip("*.")
-            url = f"https://{clean}"
+            scheme = preferred_scheme_for_host(clean)
+            netloc = f"[{clean}]" if ":" in clean and is_ip_literal(clean) else clean
+            url = f"{scheme}://{netloc}"
             if url not in seeds:
                 seeds.append(url)
         for c in self.allowed_cidrs:
             try:
                 net = ipaddress.ip_network(c, strict=False)
                 if net.num_addresses == 1:
-                    url = f"http://{net.network_address}"
+                    addr = str(net.network_address)
+                    netloc = f"[{addr}]" if ":" in addr else addr
+                    url = f"http://{netloc}"
                     if url not in seeds:
                         seeds.append(url)
+                elif net.num_addresses <= 16:
+                    for host_ip in list(net.hosts())[:16]:
+                        addr = str(host_ip)
+                        netloc = f"[{addr}]" if ":" in addr else addr
+                        url = f"http://{netloc}"
+                        if url not in seeds:
+                            seeds.append(url)
             except ValueError:
                 pass
         return seeds
