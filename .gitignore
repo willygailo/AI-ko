@@ -3,6 +3,7 @@
 .env.*
 !.env.example
 aegispt/data/
+aegispt/artifacts/
 .api_token
 .master.key
 .arjun_request.xml
@@ -42,6 +43,7 @@ coverage.xml
 htmlcov/
 .mypy_cache/
 .ruff_cache/
+.pyrefly/
 .tox/
 .nox/
 .hypothesis/
@@ -54,10 +56,13 @@ dist-ssr/
 coverage/
 *.tsbuildinfo
 .pnpm-store/
+.pnpm-debug.log*
 npm-debug.log*
 pnpm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+playwright-report/
+test-results/
 
 # === Generated Pentest Logs, Security Scans & Exported Reports ===
 *.log
