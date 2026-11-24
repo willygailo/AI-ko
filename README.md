@@ -16,6 +16,7 @@ Built for Kali Linux with allowlist-only scope enforcement, 3-tier human-in-the-
 [![React](https://img.shields.io/badge/React-18%20%2B%20TypeScript-61DAFB?style=for-the-badge&logo=react&logoColor=black)](https://react.dev/)
 [![Kali Linux](https://img.shields.io/badge/Kali%20Linux-Ready-557C94?style=for-the-badge&logo=kalilinux&logoColor=white)](https://www.kali.org/)
 
+[Screenshots](#web-dashboard-preview) •
 [How to Set Up](#how-to-set-up) •
 [How to Use](#how-to-use) •
 [Architecture](#architecture) •
@@ -23,6 +24,43 @@ Built for Kali Linux with allowlist-only scope enforcement, 3-tier human-in-the-
 [Tooling Matrix](#3-tier-tooling-matrix) •
 [API & Config](#configuration--api-reference) •
 [Testing & CI](#running-tests--ci)
+
+</div>
+
+---
+
+## Web Dashboard Preview
+
+<div align="center">
+
+### Interactive Attack-Surface Graph &amp; Live Agent Stream
+<img src="./docs/assets/dashboard-attack-graph.jpg" alt="AegisPT Attack-Surface Graph and Live Agent Stream" width="100%" />
+
+<br /><br />
+
+### Findings &amp; Report Studio (Re-Verify, Repeater Pivot &amp; 1-Click Exports)
+<img src="./docs/assets/dashboard-findings-studio.jpg" alt="AegisPT Findings and Report Studio" width="100%" />
+
+<br /><br />
+
+<table>
+  <tr>
+    <td width="50%" align="center">
+      <b>Offensive Skill Methodology Checklist (13/18 Covered)</b><br /><br />
+      <img src="./docs/assets/dashboard-skills-checklist.jpg" alt="AegisPT Skills Checklist Coverage" width="100%" />
+    </td>
+    <td width="50%" align="center">
+      <b>Scoped Engagement Wizard &amp; Lab Preset</b><br /><br />
+      <img src="./docs/assets/dashboard-scope-wizard.png" alt="AegisPT New Scoped Engagement Wizard" width="100%" />
+    </td>
+  </tr>
+</table>
+
+<details>
+<summary>View Initial Scoped Workspace (Idle State Before Assessment)</summary>
+<br />
+<img src="./docs/assets/dashboard-workspace-idle.png" alt="AegisPT Scoped Workspace Idle State" width="100%" />
+</details>
 
 </div>
 
@@ -368,7 +406,7 @@ sequenceDiagram
 ├── Makefile                            # Root DevEx entrypoints (check, lint, test, build-ui, dev)
 ├── README.md
 ├── CONTRIBUTING.md / CODE_OF_CONDUCT.md / SECURITY.md
-├── docs/assets/aegispt-banner.jpg      # README hero banner
+├── docs/assets/                        # README hero banner & Web Dashboard screenshots
 └── aegispt/
     ├── aegispt                         # Symlink- & .venv-aware CLI launcher script (./aegispt)
     ├── pyproject.toml                  # Dependencies, extras, Ruff/Pytest/Pyrefly/Pyright config
