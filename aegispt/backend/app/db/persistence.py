@@ -137,11 +137,13 @@ async def persist_tool_result(
             session.add(ep_row)
             batch_endpoints[ep_key] = ep_row
 
-    existing_eng_findings = (
-        await session.execute(
-            select(Finding).where(Finding.engagement_id == engagement_id)
-        )
-    ).scalars().all()
+    existing_eng_findings: list[Finding] = list(
+        (
+            await session.execute(
+                select(Finding).where(Finding.engagement_id == engagement_id)
+            )
+        ).scalars().all()
+    )
 
     for f in result.findings:
         fp = fingerprint_finding(f.tool_source, f.title, f.target_url, f.parameter)

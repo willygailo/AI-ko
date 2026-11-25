@@ -327,7 +327,7 @@ class ScopePolicy:
         else:
             try:
                 infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
-                ips = sorted({info[4][0] for info in infos})
+                ips = sorted({str(info[4][0]) for info in infos if isinstance(info[4][0], str)})
             except socket.gaierror:
                 # Unresolvable host (e.g. offline/DNS-only recon or synthetic domain); allowlisted domain still passes
                 ips = []
@@ -354,7 +354,7 @@ class ScopePolicy:
             loop = asyncio.get_running_loop()
             try:
                 infos = await loop.getaddrinfo(host, None, type=socket.SOCK_STREAM)
-                ips = sorted({info[4][0] for info in infos})
+                ips = sorted({str(info[4][0]) for info in infos if isinstance(info[4][0], str)})
             except socket.gaierror:
                 ips = []
 
